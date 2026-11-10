@@ -1,0 +1,8 @@
+streamlit
+pandas
+plotly
+groq
+requests
+beautifulsoup4
+openpyxl
+python-dotenv
