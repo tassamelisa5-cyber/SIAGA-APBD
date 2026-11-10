@@ -16,6 +16,7 @@ File pendukung: djpk_client.py (pengambil data), analysis.py (perhitungan)
 
 import html
 import io
+import json
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -91,12 +92,44 @@ Kondisi (angka) · Pembanding · Risiko/dampak · Langkah pemeriksaan yang disar
 ### Keterbatasan"""
 
 SYSTEM_CHAT = """Anda adalah asisten auditor internal pemerintah (APIP) yang membantu pengguna memahami
-data realisasi APBD berikut. Jawab dalam Bahasa Indonesia sederhana, ringkas, tanpa emoji, hanya
-berdasarkan data yang diberikan. Jika data tidak cukup, katakan terus terang. Jangan mengarang angka."""
+data realisasi APBD. Anda menerima ringkasan data, dan Anda punya ALAT `cari_data` untuk mencari rincian
+per akun dan per wilayah dari seluruh data yang sudah diambil sistem.
+
+Aturan:
+- Jika pertanyaan butuh rincian yang tidak ada di ringkasan (akun tertentu, wilayah tertentu, anggaran Rp0,
+  melebihi pagu, peringkat akun, dll.), WAJIB gunakan alat `cari_data` dulu sebelum menjawab.
+- Jawab hanya berdasarkan ringkasan dan hasil alat. Sebutkan nama wilayah, akun, dan angkanya.
+- Jangan mengarang angka. Jika hasil alat kosong, katakan tidak ditemukan.
+- Bahasa Indonesia sederhana, ringkas, tanpa emoji."""
+
+ALAT_AI = [{
+    "type": "function",
+    "function": {
+        "name": "cari_data",
+        "description": "Mencari baris data realisasi APBD yang sudah dianalisis sistem (per wilayah dan per akun), "
+                       "lengkap dengan anggaran, realisasi, persentase, tingkat risiko, dan alasannya.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "kondisi": {"type": "string", "enum": list(an.KONDISI.keys()),
+                            "description": "Filter utama. anggaran_nol_ada_realisasi = anggaran Rp0 tetapi ada "
+                                           "realisasi; melebihi_pagu = belanja di atas 100%; terlalu_cepat = belanja "
+                                           "jauh di atas target waktu; tertinggal = di bawah target waktu."},
+                "wilayah": {"type": "string", "description": "Sebagian nama wilayah, mis. 'Dumai' atau 'Bengkalis'. "
+                                                            "Kosongkan untuk semua wilayah."},
+                "akun": {"type": "string", "description": "Sebagian nama akun, mis. 'Modal' atau 'Hibah'."},
+                "kelompok": {"type": "string", "enum": ["", "Pendapatan", "Belanja", "Pembiayaan"]},
+                "urutkan": {"type": "string",
+                            "enum": ["", "realisasi_terendah", "realisasi_tertinggi", "sisa_terbesar"]},
+            },
+            "required": ["kondisi"],
+        },
+    },
+}]
 
 CONTOH_PERTANYAAN = [
     "Akun mana yang paling perlu diperiksa?",
-    "Apa risikonya jika belanja menumpuk di Desember?",
+    "Akun apa yang anggarannya Rp0 tapi ada realisasinya?",
     "Bagaimana posisi dibanding daerah lain?",
 ]
 
@@ -128,6 +161,17 @@ h1 {font-size: 2rem !important; margin-bottom: 0 !important;}
 .temuan {border-bottom: 1px solid rgba(128,128,128,.2); padding: .55rem 0;}
 .temuan .akun {font-weight: 600;}
 .temuan .rinci {font-size: .9rem; opacity: .85; margin-top: .15rem;}
+.kepala-bagian {border-left: 4px solid #4c6ef5; padding: .3rem 0 .3rem .9rem; margin: .4rem 0 1rem 0;}
+.kb-label {font-size: .85rem; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: #4c6ef5;}
+.kb-teks {font-size: .95rem; margin-top: .25rem; line-height: 1.65;}
+.kartu-temuan {border: 1px solid rgba(128,128,128,.28); border-left: 4px solid; border-radius: 8px;
+               padding: .8rem 1rem; margin-bottom: .8rem;}
+.kt-kepala .akun {font-weight: 650; font-size: 1.05rem;}
+.kt-inti {margin: .35rem 0 .55rem 0; font-weight: 500;}
+.kt-isi {display: grid; grid-template-columns: 150px 1fr; gap: .3rem .9rem; font-size: .92rem;}
+.kt-isi .b-label {opacity: .65;}
+.kt-isi ul {margin: 0; padding-left: 1.1rem;}
+@media (max-width: 640px) {.kt-isi {grid-template-columns: 1fr;} .kt-isi .b-label {margin-top: .3rem;}}
 .kotak-ai {border: 1px solid #4c6ef5; border-radius: 10px; padding: .2rem 1.2rem 1rem 1.2rem;
            background: rgba(76,110,245,.05);}
 .kotak-ai .kepala {font-size: .8rem; opacity: .75; margin: .7rem 0 .2rem 0;}
@@ -244,6 +288,38 @@ def tanya_groq(system, messages, model):
     return resp.choices[0].message.content
 
 
+def tanya_groq_dengan_alat(system, messages, model, semua):
+    """Tanya-jawab dengan alat pencarian. AI boleh memanggil cari_data beberapa kali sebelum menjawab.
+    Mengembalikan (jawaban, daftar_pencarian_yang_dijalankan)."""
+    from groq import Groq
+
+    client = Groq(api_key=get_api_key())
+    msgs = [{"role": "system", "content": system}] + messages
+    log = []
+    for _ in range(4):
+        resp = client.chat.completions.create(model=model, messages=msgs, temperature=0.2,
+                                              tools=ALAT_AI, tool_choice="auto")
+        m = resp.choices[0].message
+        if not getattr(m, "tool_calls", None):
+            return m.content, log
+        msgs.append({"role": "assistant", "content": m.content or "",
+                     "tool_calls": [{"id": tc.id, "type": "function",
+                                     "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
+                                    for tc in m.tool_calls]})
+        for tc in m.tool_calls:
+            try:
+                args = json.loads(tc.function.arguments or "{}")
+            except json.JSONDecodeError:
+                args = {}
+            args = {k: v for k, v in args.items() if k in ("kondisi", "wilayah", "akun", "kelompok", "urutkan") and v}
+            hasil = an.cari_data(semua, **args)
+            log.append(args)
+            msgs.append({"role": "tool", "tool_call_id": tc.id, "content": hasil})
+    # batas putaran tercapai: minta jawaban akhir tanpa alat
+    resp = client.chat.completions.create(model=model, messages=msgs, temperature=0.2)
+    return resp.choices[0].message.content, log
+
+
 def pesan_galat(e):
     t = str(e)
     if "429" in t or "rate" in t.lower():
@@ -255,11 +331,12 @@ def pesan_galat(e):
     return f"Gagal memanggil Groq: {t}"
 
 
-def bagian_ai(konteks, kunci, model):
+def bagian_ai(konteks, kunci, model, semua):
     """Catatan audit (ditulis otomatis sekali per analisis) + tanya-jawab."""
     st.subheader("Langkah 3 · Catatan audit dari AI")
     st.caption(f"Ditulis oleh AI (Groq · {model}) berdasarkan angka hasil langkah 2. "
-               "AI tidak menghitung ulang angka; ia menafsirkan dan menyusun catatan.")
+               "AI tidak menghitung ulang angka; ia menafsirkan dan menyusun catatan. Saat menjawab pertanyaan, "
+               "AI dapat mencari sendiri rincian data per akun dan per wilayah.")
     if not get_api_key():
         st.info("GROQ_API_KEY belum diatur di Secrets, jadi bagian AI dinonaktifkan. "
                 "Hasil perhitungan di atas tetap berlaku.")
@@ -300,6 +377,7 @@ def bagian_ai(konteks, kunci, model):
     with kotak:
         for m in chat:
             with st.chat_message(m["role"]):
+                tampil_pencarian(m.get("alat"))
                 st.markdown(m["content"])
     with st.container():  # di dalam container -> kolom chat tampil di tempat, halaman tidak melompat ke bawah
         q = st.chat_input("Tulis pertanyaan Anda...") or usul
@@ -309,15 +387,32 @@ def bagian_ai(konteks, kunci, model):
             with st.chat_message("user"):
                 st.markdown(q)
             with st.chat_message("assistant"):
-                with st.spinner("AI sedang menjawab..."):
+                log = []
+                with st.spinner("AI sedang mencari data dan menyusun jawaban..."):
+                    msgs = [{"role": "user", "content": f"RINGKASAN DATA:\n{konteks}"},
+                            {"role": "assistant", "content": "Baik, ringkasan sudah saya pahami."}] + \
+                           [{"role": c["role"], "content": c["content"]} for c in chat[-10:]]
                     try:
-                        msgs = [{"role": "user", "content": f"DATA:\n{konteks}"},
-                                {"role": "assistant", "content": "Baik, data sudah saya pahami."}] + chat[-10:]
-                        jawab = tanya_groq(SYSTEM_CHAT, msgs, model)
+                        jawab, log = tanya_groq_dengan_alat(SYSTEM_CHAT, msgs, model, semua)
                     except Exception as e:
-                        jawab = pesan_galat(e)
+                        try:  # cadangan: model/akun tidak mendukung alat -> jawab dari ringkasan saja
+                            jawab = tanya_groq(SYSTEM_CHAT, msgs, model)
+                        except Exception as e2:
+                            jawab = pesan_galat(e2 if str(e2) else e)
+                tampil_pencarian(log)
                 st.markdown(jawab)
-        chat.append({"role": "assistant", "content": jawab})
+        chat.append({"role": "assistant", "content": jawab, "alat": log})
+
+
+def tampil_pencarian(log):
+    """Tunjukkan pencarian yang dijalankan AI (bukti agent bertindak, bukan menebak)."""
+    if not log:
+        return
+    teks = []
+    for a in log:
+        bagian = [f"{k}: {v}" for k, v in a.items()]
+        teks.append("cari_data(" + ", ".join(bagian) + ")")
+    st.caption("AI menjalankan pencarian data: " + " · ".join(teks))
 
 
 # ---------------------------------------------------------------------------
@@ -333,7 +428,7 @@ def alur_agent(sumber, model, ai_selesai, wadah=None):
     <div class="ket">Bandingkan dengan target waktu, rata-rata se-provinsi, dan tahun lalu</div>
     <div class="status" style="color:{WARNA['Rendah']}">selesai</div></div>
   <div class="langkah ai"><div class="no">Langkah 3 · AI</div><div class="judul">Tulis catatan audit &amp; jawab pertanyaan</div>
-    <div class="ket">Groq · {html.escape(model)}</div>
+    <div class="ket">Groq · {html.escape(model)} · dapat mencari data sendiri</div>
     <div class="status" style="color:#4c6ef5">{ket_ai}</div></div>
 </div>""", unsafe_allow_html=True)
 
@@ -357,32 +452,196 @@ berarti <b>tertinggal 41,3 poin</b>.</td></tr>
 {lencana('Tinggi')} {ARTI_RISIKO['Tinggi']}<br>
 {lencana('Sedang')} {ARTI_RISIKO['Sedang']}<br>
 {lencana('Rendah')} {ARTI_RISIKO['Rendah']}<br>
-<span style="opacity:.75;font-size:.9rem">Dihitung sistem dari: seberapa jauh tertinggal dari target waktu, apakah di bawah
-rata-rata se-provinsi atau tahun lalu, apakah nilainya besar, dan apakah ada realisasi tanpa anggaran.
+<span style="opacity:.75;font-size:.9rem">Sistem memeriksa dua arah. <b>Terlalu lambat:</b> tertinggal dari target waktu,
+di bawah rata-rata se-provinsi atau tahun lalu. <b>Berlebihan:</b> ada realisasi padahal anggaran Rp0 dan belanja
+melebihi anggaran (keduanya langsung Tinggi), serta belanja yang jauh lebih cepat dari target waktu.
 Risiko adalah tanda untuk diperiksa, bukan bukti penyimpangan.</span></td></tr>
 </table>""", unsafe_allow_html=True)
 
 
-def daftar_temuan(h):
+# Penjelasan akun (bahasa sederhana) dan saran pemeriksaan berbasis aturan (bukan AI)
+KAMUS_AKUN = {
+    "PAD": ("Pendapatan Asli Daerah: pendapatan yang dipungut sendiri oleh daerah, yaitu pajak, retribusi, "
+            "laba BUMD, dan pendapatan sah lainnya.",
+            "Telusuri komponen PAD mana yang paling tertinggal, lalu bandingkan target dengan potensi riil "
+            "dan capaian tahun-tahun sebelumnya."),
+    "Pajak Daerah": ("Pungutan wajib yang dikelola daerah, misalnya PBB perdesaan/perkotaan, BPHTB, pajak "
+                     "restoran, hotel, reklame, dan penerangan jalan.",
+                     "Periksa ketetapan dan piutang pajak, wajib pajak yang belum membayar, serta efektivitas "
+                     "penagihan dan penyetoran ke kas daerah."),
+    "Retribusi Daerah": ("Pembayaran atas jasa atau izin yang diberikan pemda, misalnya parkir, pasar, "
+                         "dan pelayanan kesehatan.",
+                         "Periksa jumlah objek retribusi, tarif yang berlaku, dan setoran dari OPD pemungut; "
+                         "pastikan tidak ada penerimaan yang belum disetor."),
+    "Hasil Pengelolaan Kekayaan Daerah yang Dipisahkan": (
+        "Bagian laba dari BUMD atau bank daerah yang disetor ke pemda.",
+        "Periksa jadwal pembagian dividen, keputusan RUPS, dan kinerja BUMD terkait."),
+    "Lain-Lain PAD yang Sah": ("Pendapatan lain milik daerah, misalnya jasa giro, pendapatan BLUD (seperti "
+                               "RSUD), denda, dan penjualan aset.",
+                               "Periksa rincian sumber pendapatan dan dasar penetapan targetnya; target yang "
+                               "terlalu tinggi bisa menjadi penyebab."),
+    "TKDD": ("Transfer ke Daerah dari pemerintah pusat, misalnya DAU, DAK, dan Dana Bagi Hasil.",
+             "Periksa jadwal dan syarat penyaluran dari pusat. Keterlambatan sering terjadi karena syarat salur "
+             "(misalnya laporan) belum dipenuhi pemda."),
+    "Pendapatan Transfer Pemerintah Pusat": ("Dana dari pemerintah pusat (DAU, DAK, Dana Bagi Hasil, dan lainnya).",
+                                             "Periksa jadwal penyaluran dan syarat salur yang belum dipenuhi pemda."),
+    "Pendapatan Lainnya": ("Pendapatan di luar PAD dan transfer pusat, misalnya hibah, dana darurat, dan "
+                           "transfer dari provinsi.",
+                           "Lihat rincian akun di bawahnya untuk mengetahui sumber yang tertinggal."),
+    "Pendapatan Transfer Antar Daerah": ("Bagi hasil atau bantuan keuangan dari provinsi atau daerah lain.",
+                                         "Periksa jadwal penyaluran dari provinsi dan kelengkapan syarat pencairan."),
+    "Dana Darurat": ("Dana dari pemerintah pusat untuk penanganan bencana atau keadaan darurat.",
+                     "Periksa dasar penerimaan dan apakah sudah dimasukkan ke dalam perubahan APBD."),
+    "Pendapatan Hibah": ("Pemberian dari pihak lain kepada pemda.",
+                         "Periksa perjanjian hibah dan pencatatannya."),
+    "Belanja Pegawai": ("Gaji, tunjangan, dan honorarium aparatur sipil negara.",
+                        "Bandingkan dengan jumlah pegawai dan jadwal pembayaran; telusuri apakah anggaran tunjangan "
+                        "(misalnya TPP) disusun berlebih atau ada pembayaran yang tertunda."),
+    "Belanja Barang dan Jasa": ("Belanja operasional, misalnya alat tulis, perjalanan dinas, pemeliharaan, "
+                                "dan jasa pihak ketiga.",
+                                "Periksa rencana dan realisasi pengadaan, kegiatan yang belum berjalan, serta risiko "
+                                "penumpukan pertanggungjawaban (SPJ) di bulan Desember."),
+    "Belanja Modal": ("Belanja untuk membangun atau membeli aset, misalnya jalan, jembatan, gedung, "
+                      "kendaraan, dan peralatan.",
+                      "Periksa daftar kontrak dan progres fisik pekerjaan, jadwal termin, serta risiko pembayaran "
+                      "penuh atas pekerjaan yang belum selesai menjelang tutup tahun."),
+    "Belanja Lainnya": ("Kelompok belanja yang terdiri atas hibah, bantuan sosial, bantuan keuangan, bagi hasil, "
+                        "dan belanja tidak terduga.",
+                        "Lihat rincian akun di bawahnya untuk mengetahui bagian yang tertinggal."),
+    "Belanja Hibah": ("Pemberian uang/barang kepada lembaga, organisasi kemasyarakatan, atau instansi lain.",
+                      "Periksa naskah perjanjian hibah (NPHD), daftar penerima dan kelayakannya, jadwal penyaluran, "
+                      "serta laporan pertanggungjawaban penerima."),
+    "Belanja Bantuan Sosial": ("Bantuan kepada masyarakat untuk melindungi dari risiko sosial.",
+                               "Periksa keputusan penetapan penerima, kesesuaian kriteria, dan bukti penyaluran."),
+    "Belanja Bantuan Keuangan": ("Transfer dari pemda ke desa (misalnya Alokasi Dana Desa) atau pemda lain.",
+                                 "Periksa jadwal penyaluran dan syarat pencairan yang belum dipenuhi penerima."),
+    "Belanja Bagi Hasil": ("Bagian pajak dan retribusi daerah yang wajib dibagikan ke desa.",
+                           "Periksa dasar perhitungan dan jadwal penyaluran; keterlambatan merugikan keuangan desa."),
+    "Belanja Tidak Terduga": ("Cadangan untuk keadaan darurat, bencana, atau kebutuhan mendesak.",
+                              "Realisasi rendah wajar bila tidak ada keadaan darurat. Jika ada pemakaian, pastikan "
+                              "didukung penetapan status darurat."),
+    "Belanja Bunga": ("Pembayaran bunga atas pinjaman daerah.",
+                      "Periksa jadwal pembayaran bunga sesuai perjanjian pinjaman."),
+    "Belanja Subsidi": ("Bantuan biaya produksi kepada perusahaan/lembaga agar harga layanan terjangkau.",
+                        "Periksa dasar penetapan subsidi dan penerimanya."),
+}
+SARAN_KHUSUS = {
+    "Tanpa anggaran": "Periksa dasar hukum realisasi tanpa anggaran ini: apakah sudah ditampung dalam perubahan APBD "
+                      "atau peraturan kepala daerah, dan apakah bukti pendukungnya lengkap.",
+    "Melebihi pagu": "Periksa dokumen pencairan (SP2D) yang membuat realisasi melampaui anggaran dan dasar hukumnya.",
+    "Terlalu cepat": "Periksa apakah ada pembayaran di muka, salah pencatatan akun, atau anggaran yang akan habis "
+                     "sebelum akhir tahun.",
+}
+
+
+def _baris(label, isi):
+    return f'<div class="b-label">{label}</div><div class="b-isi">{isi}</div>'
+
+
+def kartu_temuan(x):
+    """Satu akun berisiko, dijelaskan rinci dan terstruktur."""
+    waktu = x["Waktu%"]
+    pendapatan = x["Kelompok"] == "Pendapatan"
+    kata = "diterima" if pendapatan else "dibelanjakan"
+    arti, saran = KAMUS_AKUN.get(x["Akun"], ("", ""))
+
+    if "Tanpa anggaran" in x["Jenis"]:
+        inti = f"Ada realisasi {an.rp(x['Realisasi'])}, padahal akun ini tidak dianggarkan (Rp0)."
+    elif "Melebihi pagu" in x["Jenis"]:
+        inti = f"Sudah {kata} {an.pct(x['Real%'])}, melebihi anggaran yang tersedia."
+    elif "Terlalu cepat" in x["Jenis"]:
+        inti = f"Sudah {kata} {an.pct(x['Real%'])}, jauh lebih cepat dari target waktu {an.pct(waktu)}."
+    else:
+        inti = f"Baru {kata} {an.pct(x['Real%'])}, padahal target waktu {an.pct(waktu)}."
+
+    isi = []
+    if arti:
+        isi.append(_baris("Apa ini", html.escape(arti)))
+    isi.append(_baris("Kondisi", f"Anggaran {an.rp(x['Anggaran'])}, sudah {kata} {an.rp(x['Realisasi'])}"
+                                 + (f" ({an.pct(x['Real%'])}). Belum {kata}: {an.rp(x['Sisa'])}."
+                                    if x["Anggaran"] > 0 else ".")))
+    if x["Anggaran"] > 0 and x["Gap_Waktu"] < 0:
+        seharusnya = x["Anggaran"] * waktu / 100
+        isi.append(_baris("Seharusnya", f"Jika merata, sampai bulan ini seharusnya sudah sekitar "
+                                        f"<b>{an.rp(seharusnya)}</b> ({an.pct(waktu)}). Kurang sekitar "
+                                        f"<b>{an.rp(seharusnya - x['Realisasi'])}</b>, atau "
+                                        f"{an.selisih_kata(x['Gap_Waktu'])}."))
+    pb = []
+    if pd.notna(x.get("Real%_Pembanding")):
+        pb.append(f"rata-rata se-provinsi {an.pct(x['Real%_Pembanding'])}")
+    if pd.notna(x.get("Real%_TahunLalu")):
+        pb.append(f"bulan yang sama tahun lalu {an.pct(x['Real%_TahunLalu'])}")
+    if pb:
+        isi.append(_baris("Pembanding", "; ".join(pb).capitalize() + "."))
+    alasan = [a.replace("info: ", "") for a in x["Alasan"].split("; ") if a]
+    if alasan:
+        isi.append(_baris("Mengapa berisiko",
+                          "<ul>" + "".join(f"<li>{html.escape(a[:1].upper() + a[1:])}</li>" for a in alasan)
+                          + "</ul>"))
+    saran_all = [SARAN_KHUSUS[j] for j in SARAN_KHUSUS if j in x["Jenis"]] + ([saran] if saran else [])
+    if saran_all:
+        isi.append(_baris("Saran pemeriksaan", html.escape(" ".join(saran_all))))
+
+    return (f'<div class="kartu-temuan" style="border-left-color:{WARNA[x["Risiko"]]}">'
+            f'<div class="kt-kepala">{lencana(x["Risiko"])}<span class="akun">{html.escape(x["Akun"])}</span>'
+            f'<span style="opacity:.6;font-size:.85rem"> · {x["Kelompok"]}</span></div>'
+            f'<div class="kt-inti">{html.escape(inti)}</div>'
+            f'<div class="kt-isi">{"".join(isi)}</div></div>')
+
+
+def daftar_temuan(h, nama=""):
     r = h[(h["Risiko"] != "Rendah") & (h["Level"] > 1)].sort_values(["Skor", "Sisa"], ascending=False)
+    n_t, n_s = int((r["Risiko"] == "Tinggi").sum()), int((r["Risiko"] == "Sedang").sum())
+    st.markdown(f"""
+<div class="kepala-bagian">
+  <div class="kb-label">Pengukuran risiko{(" · " + html.escape(nama)) if nama else ""}</div>
+  <div class="kb-teks">Bagian ini menampilkan <b>semua akun anggaran yang diberi tanda risiko oleh sistem</b>:
+  {lencana('Tinggi')}<b>{n_t}</b> akun dan {lencana('Sedang')}<b>{n_s}</b> akun, diurutkan dari yang paling
+  berisiko. Setiap akun dijelaskan: apa artinya, kondisinya, berapa yang seharusnya sudah terealisasi,
+  pembandingnya, alasan diberi tanda, dan saran pemeriksaan. Akun berisiko rendah tidak ditampilkan di sini
+  (lihat tab Tabel lengkap).</div>
+</div>""", unsafe_allow_html=True)
     if r.empty:
         st.success("Tidak ada akun dengan risiko sedang atau tinggi.")
         return
+    kartu_list = [kartu_temuan(x) for _, x in r.iterrows()]
+    tampil = 5
+    st.markdown("".join(kartu_list[:tampil]), unsafe_allow_html=True)
+    if len(kartu_list) > tampil:
+        with st.expander(f"Lihat {len(kartu_list) - tampil} akun berisiko lainnya"):
+            st.markdown("".join(kartu_list[tampil:]), unsafe_allow_html=True)
+
+
+def rinci_anomali(x):
+    alasan = x["Alasan"].replace("info: ", "")
+    alasan = alasan[:1].upper() + alasan[1:]
+    if "Tanpa anggaran" in x["Jenis"]:
+        return f"{alasan}."
+    return f"Anggaran {an.rp(x['Anggaran'])}, realisasi {an.rp(x['Realisasi'])}. {alasan}."
+
+
+def daftar_anomali(semua, fokus=None):
+    a = an.cari_anomali(semua)
+    st.markdown("""
+<div class="kepala-bagian">
+  <div class="kb-label">Deteksi anomali</div>
+  <div class="kb-teks">Bagian ini mencari akun yang realisasinya <b>berlebihan atau tidak wajar</b> di semua wilayah
+  yang datanya diambil: ada realisasi padahal anggarannya Rp0, belanja melebihi anggaran, belanja jauh lebih cepat
+  dari target waktu, atau pendapatan jauh melampaui target (sebagai informasi).</div>
+</div>""", unsafe_allow_html=True)
+    if a.empty:
+        st.success("Tidak ditemukan anomali pada wilayah yang dianalisis.")
+        return
     baris = []
-    for _, x in r.iterrows():
-        rinci = (f"Realisasi {an.pct(x['Real%'])} dari anggaran {an.rp(x['Anggaran'])} "
-                 f"(belum terealisasi {an.rp(x['Sisa'])}). Alasan: {x['Alasan']}.")
-        if x["Anggaran"] == 0:
-            rinci = f"Anggaran Rp0 tetapi realisasi {an.rp(x['Realisasi'])}. Alasan: {x['Alasan']}."
-        baris.append(f'<div class="temuan">{lencana(x["Risiko"])}<span class="akun">{html.escape(x["Akun"])}</span>'
-                     f'<span style="opacity:.6;font-size:.85rem"> · {x["Kelompok"]}</span>'
-                     f'<div class="rinci">{html.escape(rinci)}</div></div>')
-    tampil = 6
-    st.caption(f"{len(baris)} akun berisiko sedang/tinggi, diurutkan dari yang paling berisiko.")
-    st.markdown("".join(baris[:tampil]), unsafe_allow_html=True)
-    if len(baris) > tampil:
-        with st.expander(f"Lihat {len(baris) - tampil} akun lainnya"):
-            st.markdown("".join(baris[tampil:]), unsafe_allow_html=True)
+    for _, x in a.iterrows():
+        label = lencana(x["Risiko"]) if x["Jenis"] != "Info" else \
+            '<span class="lencana" style="color:#868e96">Info</span>'
+        tebal = "font-weight:700;" if fokus and x["Wilayah"] == fokus else ""
+        baris.append(f'<div class="temuan">{label}<span class="akun">{html.escape(x["Akun"])}</span>'
+                     f'<span style="opacity:.75;{tebal}"> · {html.escape(x["Wilayah"])}</span>'
+                     f'<span style="opacity:.6;font-size:.85rem"> · {x["Jenis"]}</span>'
+                     f'<div class="rinci">{html.escape(rinci_anomali(x))}</div></div>')
+    st.markdown("".join(baris), unsafe_allow_html=True)
 
 
 def tabel_lengkap(h):
@@ -475,11 +734,12 @@ def unduh_excel(lembar: dict):
 # ---------------------------------------------------------------------------
 # Halaman hasil
 # ---------------------------------------------------------------------------
-def tampil_pemda(nama, tahun, periode, h, peringkat, keterangan, model, sumber):
+def tampil_pemda(nama, tahun, periode, h, peringkat, keterangan, model, sumber, semua):
     waktu = periode / 12 * 100
     idx = h.set_index("Akun")
     kunci = f"pemda|{nama}|{tahun}|{periode}"
     konteks = an.ringkasan_untuk_ai(nama, tahun, periode, h, peringkat, keterangan)
+    konteks += an.ringkasan_lintas_wilayah(semua, fokus=nama)
 
     st.markdown(f"## {nama}")
     st.markdown(f'<div class="subjudul">Realisasi APBD s.d. {BULAN[periode - 1]} {tahun}. {html.escape(keterangan)}</div>',
@@ -508,9 +768,13 @@ def tampil_pemda(nama, tahun, periode, h, peringkat, keterangan, model, sumber):
 
     # --- Langkah 2: hasil perhitungan sistem
     st.subheader("Langkah 2 · Hasil perhitungan sistem")
-    t1, t2, t3, t4 = st.tabs(["Akun yang perlu perhatian", "Grafik", "Tabel lengkap", "Perbandingan antar pemda"])
+    n_anom = len(an.cari_anomali(semua))
+    t1, t5, t2, t3, t4 = st.tabs(["Pengukuran risiko", f"Anomali ({n_anom})", "Grafik", "Tabel lengkap",
+                                  "Perbandingan antar pemda"])
     with t1:
-        daftar_temuan(h)
+        daftar_temuan(h, nama)
+    with t5:
+        daftar_anomali(semua, fokus=nama)
     with t2:
         st.caption("Batang = realisasi tiap akun (warna = tingkat risiko). Garis abu-abu = rata-rata se-provinsi. "
                    "Garis biru putus-putus = target waktu.")
@@ -533,21 +797,19 @@ def tampil_pemda(nama, tahun, periode, h, peringkat, keterangan, model, sumber):
             tabel_peringkat(peringkat)
 
     st.divider()
-    bagian_ai(konteks, kunci, model)
+    bagian_ai(konteks, kunci, model, semua)
     alur_agent(f"Portal Data SIKD DJPK Kemenkeu ({sumber})", model, ai_ok(kunci), wadah_alur)
 
 
-def tampil_multi(judul, tahun, periode, data, agregat, model, kunci):
-    """Mode Provinsi / Nasional: peringkat antar wilayah + jumlah akun berisiko tinggi."""
+def tampil_multi(judul, tahun, periode, data, analisis, semua, model, kunci):
+    """Mode Provinsi / Nasional: peringkat antar wilayah + anomali + jumlah akun berisiko tinggi."""
     waktu = periode / 12 * 100
     peringkat = an.tabel_peringkat(data, periode)
-    jml = {}
-    for nama, df in data.items():
-        h = an.analisis_pemda(df, periode, df_pembanding=agregat)
-        jml[nama] = int(((h["Risiko"] == "Tinggi") & (h["Level"] > 1)).sum())
+    jml = {nama: int(((h["Risiko"] == "Tinggi") & (h["Level"] > 1)).sum()) for nama, h in analisis.items()}
     peringkat["Akun risiko tinggi"] = peringkat["Wilayah"].map(jml)
     konteks = an.ringkasan_untuk_ai(judul, tahun, periode, None, peringkat)
     konteks += "\n\n## Jumlah akun berisiko tinggi per wilayah\n" + "\n".join(f"- {k}: {v}" for k, v in jml.items())
+    konteks += an.ringkasan_lintas_wilayah(semua)
 
     st.markdown(f"## {judul}")
     st.markdown(f'<div class="subjudul">Perbandingan realisasi APBD s.d. {BULAN[periode - 1]} {tahun}</div>',
@@ -566,7 +828,10 @@ def tampil_multi(judul, tahun, periode, data, agregat, model, kunci):
     panduan_membaca(periode)
 
     st.subheader("Langkah 2 · Hasil perhitungan sistem")
-    t1, t2 = st.tabs(["Peringkat wilayah", "Detail per wilayah"])
+    n_anom = len(an.cari_anomali(semua))
+    t1, t3, t2 = st.tabs(["Peringkat wilayah", f"Anomali ({n_anom})", "Detail per wilayah"])
+    with t3:
+        daftar_anomali(semua)
     with t1:
         st.caption("Diurutkan dari realisasi belanja terendah. Batang = realisasi belanja daerah; "
                    "titik gelap = realisasi belanja modal; garis biru = target waktu.")
@@ -576,13 +841,13 @@ def tampil_multi(judul, tahun, periode, data, agregat, model, kunci):
                            file_name=f"SIAGA-APBD_peringkat_{tahun}-{periode:02d}.xlsx")
     with t2:
         pilih = st.selectbox("Pilih wilayah", list(peringkat["Wilayah"]))
-        h = an.analisis_pemda(data[pilih], periode, df_pembanding=agregat)
-        daftar_temuan(h)
+        h = analisis[pilih]
+        daftar_temuan(h, pilih)
         with st.expander("Tabel lengkap"):
             tabel_lengkap(h)
 
     st.divider()
-    bagian_ai(konteks, kunci, model)
+    bagian_ai(konteks, kunci, model, semua)
     alur_agent("Portal Data SIKD DJPK Kemenkeu", model, ai_ok(kunci), wadah_alur)
 
 
@@ -650,7 +915,8 @@ if jalan:
             df_pb = baca_upload(f_pb) if f_pb else None
             h = an.analisis_pemda(df_now, periode, df_tl, df_pb, ambang)
             st.session_state["hasil"] = dict(jenis="pemda", nama=nama_up, h=h, peringkat=None,
-                                             keterangan="Data dari file upload.", sumber="file upload")
+                                             keterangan="Data dari file upload.", sumber="file upload",
+                                             semua=an.gabung_hasil({nama_up: h}))
         elif mode == "Satu pemda":
             with st.spinner(f"Mengambil data {pemda_map[pemda]} dari DJPK..."):
                 df_now, info = ambil_aman(tahun, periode, prov, pemda)
@@ -665,14 +931,18 @@ if jalan:
             if cek_peer:
                 daftar += [(pemda_map[k], tahun, periode, prov, k) for k in pemda_map if k != pemda]
             lain = ambil_banyak(daftar, "Mengambil data pembanding")
-            h = an.analisis_pemda(df_now, periode, lain.pop("__tahun_lalu__", None),
-                                  lain.pop("__agregat__", None), ambang)
+            agregat = lain.pop("__agregat__", None)
+            h = an.analisis_pemda(df_now, periode, lain.pop("__tahun_lalu__", None), agregat, ambang)
+            # analisis juga pemda lain, agar anomali & pencarian AI mencakup seluruh provinsi
+            analisis = {pemda_map[pemda]: h}
+            analisis.update({w: an.analisis_pemda(df, periode, df_pembanding=agregat, ambang_waktu=ambang)
+                             for w, df in lain.items()})
             peringkat = None
             if cek_peer:
                 lain[pemda_map[pemda]] = df_now
                 peringkat = an.tabel_peringkat(lain, periode)
             st.session_state["hasil"] = dict(jenis="pemda", nama=pemda_map[pemda], h=h, peringkat=peringkat,
-                                             keterangan=ket, sumber=info)
+                                             keterangan=ket, sumber=info, semua=an.gabung_hasil(analisis))
         elif mode == "Satu provinsi":
             pemda_map = ambil_pemda(prov, tahun)
             daftar = [(v, tahun, periode, prov, k) for k, v in pemda_map.items()]
@@ -682,15 +952,19 @@ if jalan:
             if not data:
                 st.error("Tidak ada data yang berhasil diambil.")
                 st.stop()
-            st.session_state["hasil"] = dict(jenis="multi", judul=prov_map[prov], data=data, agregat=agregat)
+            analisis = {w: an.analisis_pemda(df, periode, df_pembanding=agregat, ambang_waktu=ambang)
+                        for w, df in data.items()}
+            st.session_state["hasil"] = dict(jenis="multi", judul=prov_map[prov], data=data, analisis=analisis,
+                                             semua=an.gabung_hasil(analisis))
         else:
             daftar = [(v.replace("Provinsi ", "Se-Prov. "), tahun, periode, k, "--") for k, v in prov_map.items()]
             data = ambil_banyak(daftar, "Mengambil data gabungan 38 provinsi")
             if not data:
                 st.error("Tidak ada data yang berhasil diambil.")
                 st.stop()
+            analisis = {w: an.analisis_pemda(df, periode, ambang_waktu=ambang) for w, df in data.items()}
             st.session_state["hasil"] = dict(jenis="multi", judul="Nasional (gabungan per provinsi)",
-                                             data=data, agregat=None)
+                                             data=data, analisis=analisis, semua=an.gabung_hasil(analisis))
         st.session_state["param"] = (tahun, periode)
     except Exception as e:
         st.error(f"Terjadi kesalahan: {e}")
@@ -710,6 +984,6 @@ atau tidak wajar**, lalu meminta AI menuliskan catatan audit dan langkah pemerik
 else:
     t_, p_ = st.session_state["param"]
     if H["jenis"] == "pemda":
-        tampil_pemda(H["nama"], t_, p_, H["h"], H["peringkat"], H["keterangan"], model, H["sumber"])
+        tampil_pemda(H["nama"], t_, p_, H["h"], H["peringkat"], H["keterangan"], model, H["sumber"], H["semua"])
     else:
-        tampil_multi(H["judul"], t_, p_, H["data"], H["agregat"], model, f"multi|{H['judul']}|{t_}|{p_}")
+        tampil_multi(H["judul"], t_, p_, H["data"], H["analisis"], H["semua"], model, f"multi|{H['judul']}|{t_}|{p_}")

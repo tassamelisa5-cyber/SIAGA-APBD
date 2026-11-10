@@ -30,7 +30,13 @@ def angka(x, desimal=2) -> str:
 
 def rp(x) -> str:
     """Format rupiah ringkas dalam miliar: 1.234.567.890.000 -> 'Rp1.234,57 miliar'."""
-    return "–" if _kosong(x) else f"Rp{angka(x / 1e9)} miliar"
+    if _kosong(x):
+        return "–"
+    if x == 0:
+        return "Rp0"
+    if abs(x) < 1e9:
+        return f"Rp{angka(x / 1e6)} juta"
+    return f"Rp{angka(x / 1e9)} miliar"
 
 
 def pct(x) -> str:
@@ -98,31 +104,131 @@ def analisis_pemda(df_now: pd.DataFrame, periode: int,
     d["Porsi%"] = d.apply(lambda r: r["Anggaran"] / total.get(r["Kelompok"], np.nan) * 100
                           if total.get(r["Kelompok"]) else np.nan, axis=1)
 
-    skor, risiko, alasan = [], [], []
+    skor, risiko, alasan, jenis = [], [], [], []
     for _, r in d.iterrows():
-        s, why = 0, []
-        tanpa_pagu = (r["Anggaran"] == 0) and (r["Realisasi"] > 0)
-        if tanpa_pagu:
-            s, why = 5, ["ada realisasi padahal pagu anggaran Rp0"]
+        s, why, jn = 0, [], []
+        g = r["Gap_Waktu"]
+        if r["Anggaran"] == 0 and r["Realisasi"] > 0:
+            # Arah "berlebih" 1: ada realisasi padahal tidak dianggarkan -> langsung Tinggi
+            s, why, jn = 5, [f"ada realisasi {rp(r['Realisasi'])} padahal anggaran Rp0"], ["Tanpa anggaran"]
+        elif r["Kelompok"] == "Belanja" and r["Anggaran"] > 0 and r["Real%"] > 100:
+            # Arah "berlebih" 2: belanja melebihi pagu -> langsung Tinggi
+            s, jn = 5, ["Melebihi pagu"]
+            why = [f"belanja melebihi pagu ({pct(r['Real%'])} dari anggaran)"]
         elif r["Kelompok"] in ("Pendapatan", "Belanja") and r["Anggaran"] > 0:
-            g = r["Gap_Waktu"]
+            # Arah "lambat": tertinggal dari target waktu
             if g <= -2 * ambang_waktu:
-                s += 2; why.append(f"tertinggal {abs(g):.0f} poin dari target waktu")
+                s += 2; why.append(f"tertinggal {abs(g):.0f} poin dari target waktu"); jn.append("Tertinggal")
             elif g <= -ambang_waktu:
-                s += 1; why.append(f"tertinggal {abs(g):.0f} poin dari target waktu")
+                s += 1; why.append(f"tertinggal {abs(g):.0f} poin dari target waktu"); jn.append("Tertinggal")
+            # Arah "berlebih" 3: belanja jauh lebih cepat dari target waktu (masih <= 100%)
+            if r["Kelompok"] == "Belanja" and g >= 2 * ambang_waktu:
+                s += 1; why.append(f"lebih cepat {g:.0f} poin dari target waktu (tidak lazim)")
+                jn.append("Terlalu cepat")
             if pd.notna(r["Gap_Pembanding"]) and r["Gap_Pembanding"] <= -15:
                 s += 1; why.append(f"{abs(r['Gap_Pembanding']):.0f} poin di bawah rata-rata se-provinsi")
             if pd.notna(r["Gap_TahunLalu"]) and r["Gap_TahunLalu"] <= -15:
                 s += 1; why.append(f"{abs(r['Gap_TahunLalu']):.0f} poin di bawah capaian tahun lalu")
-            if r["Kelompok"] == "Belanja" and r["Real%"] > 100:
-                s += 2; why.append("realisasi melebihi pagu")
             if s > 0 and pd.notna(r["Porsi%"]) and r["Porsi%"] >= 10 and r["Level"] > 1:
                 s += 1; why.append(f"nilainya besar ({r['Porsi%']:.0f}% dari total {r['Kelompok'].lower()})")
+            # Catatan informasi (tanpa skor): pendapatan jauh melampaui target
+            if r["Kelompok"] == "Pendapatan" and r["Real%"] > 120:
+                why.append(f"info: pendapatan {pct(r['Real%'])} dari target, mungkin target disusun terlalu rendah")
+                jn.append("Info")
         skor.append(s)
         risiko.append("Tinggi" if s >= 3 else "Sedang" if s == 2 else "Rendah")
         alasan.append("; ".join(why))
-    d["Skor"], d["Risiko"], d["Alasan"] = skor, risiko, alasan
+        jenis.append(", ".join(jn))
+    d["Skor"], d["Risiko"], d["Alasan"], d["Jenis"] = skor, risiko, alasan, jenis
     return d
+
+
+# ---------------------------------------------------------------------------
+# 1b. Gabungan lintas wilayah, anomali, dan pencarian (dipakai tab Anomali & alat AI)
+# ---------------------------------------------------------------------------
+JENIS_ANOMALI = ["Tanpa anggaran", "Melebihi pagu", "Terlalu cepat", "Info"]
+
+
+def gabung_hasil(hasil: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """{wilayah: hasil analisis_pemda} -> satu tabel panjang dengan kolom Wilayah."""
+    if not hasil:
+        return pd.DataFrame()
+    return pd.concat([h.assign(Wilayah=w) for w, h in hasil.items()], ignore_index=True)
+
+
+def cari_anomali(semua: pd.DataFrame) -> pd.DataFrame:
+    """Akun dengan arah 'berlebih': tanpa anggaran, melebihi pagu, terlalu cepat, info pendapatan."""
+    if semua.empty:
+        return semua
+    m = semua["Jenis"].apply(lambda j: any(x in j for x in JENIS_ANOMALI))
+    a = semua[m].copy()
+    urut = {"Tanpa anggaran": 0, "Melebihi pagu": 1, "Terlalu cepat": 2, "Info": 3}
+    a["_u"] = a["Jenis"].apply(lambda j: min(urut[x] for x in urut if x in j))
+    return a.sort_values(["_u", "Realisasi"], ascending=[True, False]).drop(columns="_u")
+
+
+KONDISI = {
+    "anggaran_nol_ada_realisasi": lambda d: (d["Anggaran"] == 0) & (d["Realisasi"] > 0),
+    "melebihi_pagu": lambda d: (d["Kelompok"] == "Belanja") & (d["Real%"] > 100),
+    "terlalu_cepat": lambda d: d["Jenis"].str.contains("Terlalu cepat"),
+    "tertinggal": lambda d: d["Jenis"].str.contains("Tertinggal"),
+    "risiko_tinggi": lambda d: d["Risiko"] == "Tinggi",
+    "semua": lambda d: pd.Series(True, index=d.index),
+}
+
+
+def ringkasan_lintas_wilayah(semua: pd.DataFrame, fokus: str = "", maks_anomali: int = 15,
+                             per_wilayah: int = 3) -> str:
+    """Teks ringkas untuk AI: anomali lintas wilayah + akun risiko tinggi teratas tiap wilayah."""
+    if semua.empty:
+        return ""
+    L = ["\n## Anomali arah 'berlebih' (semua wilayah yang diambil)"]
+    a = cari_anomali(semua)
+    if a.empty:
+        L.append("- Tidak ada.")
+    for _, r in a.head(maks_anomali).iterrows():
+        L.append(f"- {r['Wilayah']} | {r['Akun']} [{r['Kelompok']}] | {r['Jenis']} | {r['Alasan']}")
+    if len(a) > maks_anomali:
+        L.append(f"- ... dan {len(a) - maks_anomali} lainnya (gunakan alat cari_data untuk melihat semua)")
+    L.append(f"\n## Akun risiko tinggi teratas per wilayah (maks {per_wilayah})")
+    t = semua[(semua["Risiko"] == "Tinggi") & (semua["Level"] > 1)]
+    for w, g in t.groupby("Wilayah", sort=False):
+        if fokus and w == fokus:
+            continue
+        isi = "; ".join(f"{r['Akun']} {pct(r['Real%'])}" for _, r in
+                        g.sort_values(["Skor", "Sisa"], ascending=False).head(per_wilayah).iterrows())
+        L.append(f"- {w}: {isi}")
+    return "\n".join(L)
+
+
+def cari_data(semua: pd.DataFrame, kondisi: str = "semua", wilayah: str = "", akun: str = "",
+              kelompok: str = "", urutkan: str = "", maks: int = 40) -> str:
+    """Pencarian data untuk AI. Mengembalikan tabel teks ringkas."""
+    if semua.empty:
+        return "Tidak ada data."
+    d = semua[semua["Level"] > 0]
+    d = d[KONDISI.get(kondisi, KONDISI["semua"])(d)]
+    if wilayah:
+        d = d[d["Wilayah"].str.contains(wilayah, case=False, regex=False)]
+    if akun:
+        d = d[d["Akun"].str.contains(akun, case=False, regex=False)]
+    if kelompok:
+        d = d[d["Kelompok"].str.contains(kelompok, case=False, regex=False, na=False)]
+    if urutkan == "realisasi_terendah":
+        d = d.sort_values("Real%")
+    elif urutkan == "realisasi_tertinggi":
+        d = d.sort_values("Real%", ascending=False)
+    elif urutkan == "sisa_terbesar":
+        d = d.sort_values("Sisa", ascending=False)
+    n = len(d)
+    if n == 0:
+        return "Tidak ditemukan data yang cocok dengan kriteria tersebut."
+    baris = [f"Ditemukan {n} baris" + (f" (ditampilkan {maks} pertama)" if n > maks else "") + ":"]
+    for _, r in d.head(maks).iterrows():
+        baris.append(f"- {r['Wilayah']} | {r['Akun']} [{r['Kelompok']}] | anggaran {rp(r['Anggaran'])} | "
+                     f"realisasi {rp(r['Realisasi'])} ({pct(r['Real%'])}) | risiko {r['Risiko']} | "
+                     f"{r['Alasan'] or '-'}")
+    return "\n".join(baris)
 
 
 # ---------------------------------------------------------------------------
