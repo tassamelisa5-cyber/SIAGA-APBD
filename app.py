@@ -25,8 +25,15 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+import importlib
+
 import analysis as an
 import djpk_client as djpk
+
+# Muat ulang modul pendukung setiap kali aplikasi berjalan, agar setelah file di GitHub diperbarui
+# Streamlit Cloud tidak memakai versi lama yang masih tersimpan di memori.
+an = importlib.reload(an)
+djpk = importlib.reload(djpk)
 
 # ---------------------------------------------------------------------------
 # Konfigurasi
@@ -276,13 +283,39 @@ def baca_upload(file):
 # ---------------------------------------------------------------------------
 # AI (Groq)
 # ---------------------------------------------------------------------------
+LARANGAN_ALAT = ("PENTING: jangan memanggil alat, kode, python, browser, atau container apa pun "
+                  "selain yang disediakan. Jawab langsung dengan teks biasa.")
+
+
+def _galat_alat(e):
+    """Model gpt-oss kadang 'berhalusinasi' memanggil alat bawaannya (mis. container.exec/python)
+    yang tidak kita sediakan, sehingga Groq menolak dengan error 400 tool_use_failed."""
+    t = str(e).lower()
+    return "tool_use_failed" in t or "tool call validation" in t or "called a tool" in t
+
+
+def _panggil(client, **kw):
+    """Memanggil Groq; bila model salah memanggil alat, ulangi sampai 3 kali dengan larangan tegas."""
+    for percobaan in range(3):
+        try:
+            return client.chat.completions.create(**kw)
+        except Exception as e:
+            if not _galat_alat(e) or percobaan == 2:
+                raise
+            msgs = list(kw["messages"])
+            msgs.append({"role": "system", "content": LARANGAN_ALAT})
+            kw["messages"] = msgs
+            kw["temperature"] = 0.1
+
+
 def tanya_groq(system, messages, model):
     from groq import Groq
 
     client = Groq(api_key=get_api_key())
-    resp = client.chat.completions.create(
+    resp = _panggil(
+        client,
         model=model,
-        messages=[{"role": "system", "content": system}] + messages,
+        messages=[{"role": "system", "content": system + "\n\n" + LARANGAN_ALAT}] + messages,
         temperature=0.3,
     )
     return resp.choices[0].message.content
@@ -297,11 +330,15 @@ def tanya_groq_dengan_alat(system, messages, model, semua):
     msgs = [{"role": "system", "content": system}] + messages
     log = []
     for _ in range(4):
-        resp = client.chat.completions.create(model=model, messages=msgs, temperature=0.2,
-                                              tools=ALAT_AI, tool_choice="auto")
+        resp = _panggil(client, model=model, messages=msgs, temperature=0.2,
+                        tools=ALAT_AI, tool_choice="auto")
         m = resp.choices[0].message
         if not getattr(m, "tool_calls", None):
             return m.content, log
+        if any(tc.function.name != "cari_data" for tc in m.tool_calls):
+            # model memanggil alat yang tidak ada: abaikan, minta jawaban teks
+            msgs.append({"role": "system", "content": "Satu-satunya alat yang ada adalah cari_data. " + LARANGAN_ALAT})
+            continue
         msgs.append({"role": "assistant", "content": m.content or "",
                      "tool_calls": [{"id": tc.id, "type": "function",
                                      "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
@@ -316,7 +353,8 @@ def tanya_groq_dengan_alat(system, messages, model, semua):
             log.append(args)
             msgs.append({"role": "tool", "tool_call_id": tc.id, "content": hasil})
     # batas putaran tercapai: minta jawaban akhir tanpa alat
-    resp = client.chat.completions.create(model=model, messages=msgs, temperature=0.2)
+    msgs.append({"role": "system", "content": "Sekarang tulis jawaban akhir. " + LARANGAN_ALAT})
+    resp = _panggil(client, model=model, messages=msgs, temperature=0.2)
     return resp.choices[0].message.content, log
 
 
@@ -328,6 +366,9 @@ def pesan_galat(e):
         return "API key Groq tidak valid. Periksa GROQ_API_KEY di Secrets."
     if "model" in t.lower() and ("not found" in t.lower() or "decommission" in t.lower()):
         return "Model tidak tersedia. Pilih model lain di Pengaturan lanjutan."
+    if _galat_alat(e):
+        return ("AI sempat mencoba menjalankan alat yang tidak tersedia (kebiasaan model gpt-oss). "
+                "Klik 'Tulis ulang' atau kirim ulang pertanyaan; bila berulang, ganti model di Pengaturan lanjutan.")
     return f"Gagal memanggil Groq: {t}"
 
 
