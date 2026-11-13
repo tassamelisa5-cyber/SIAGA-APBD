@@ -638,12 +638,18 @@ def _baris(label, isi):
     return f'<div class="b-label">{label}</div><div class="b-isi">{isi}</div>'
 
 
+def saran_untuk(x):
+    """Saran pemeriksaan berbasis aturan (bukan AI) untuk satu akun."""
+    saran = KAMUS_AKUN.get(x["Akun"], ("", ""))[1]
+    return " ".join([SARAN_KHUSUS[j] for j in SARAN_KHUSUS if j in x["Jenis"]] + ([saran] if saran else []))
+
+
 def kartu_temuan(x):
     """Satu akun berisiko, dijelaskan rinci dan terstruktur."""
     waktu = x["Waktu%"]
     pendapatan = x["Kelompok"] == "Pendapatan"
     kata = "diterima" if pendapatan else "dibelanjakan"
-    arti, saran = KAMUS_AKUN.get(x["Akun"], ("", ""))
+    arti = KAMUS_AKUN.get(x["Akun"], ("", ""))[0]
 
     if "Tanpa anggaran" in x["Jenis"]:
         inti = f"Ada realisasi {an.rp(x['Realisasi'])}, padahal akun ini tidak dianggarkan (Rp0)."
@@ -678,9 +684,9 @@ def kartu_temuan(x):
         isi.append(_baris("Mengapa berisiko",
                           "<ul>" + "".join(f"<li>{html.escape(a[:1].upper() + a[1:])}</li>" for a in alasan)
                           + "</ul>"))
-    saran_all = [SARAN_KHUSUS[j] for j in SARAN_KHUSUS if j in x["Jenis"]] + ([saran] if saran else [])
+    saran_all = saran_untuk(x)
     if saran_all:
-        isi.append(_baris("Saran pemeriksaan", html.escape(" ".join(saran_all))))
+        isi.append(_baris("Saran pemeriksaan", html.escape(saran_all)))
 
     return (f'<div class="kartu-temuan" style="border-left-color:{WARNA[x["Risiko"]]}">'
             f'<div class="kt-kepala">{lencana(x["Risiko"])}<span class="akun">{html.escape(x["Akun"])}</span>'
@@ -833,15 +839,304 @@ def unduh_excel(lembar: dict):
     return buf.getvalue()
 
 
+
+# ---------------------------------------------------------------------------
+# Rasio keuangan & kepatuhan belanja wajib
+# ---------------------------------------------------------------------------
+WARNA_STATUS = {"Melebihi batas": WARNA["Tinggi"], "Di bawah batas": WARNA["Tinggi"],
+                "Sesuai batas": WARNA["Rendah"], "Informasi": "#9D8CFF", "Tidak ada data": "#8C97B8"}
+
+
+def lencana_status(status):
+    return f'<span class="lencana" style="color:{WARNA_STATUS.get(status, "#8C97B8")}">{status}</span>'
+
+
+def bagian_rasio(r, nama=""):
+    st.markdown(f"""
+<div class="kepala-bagian">
+  <div class="kb-label">Rasio keuangan &amp; kepatuhan{(" · " + html.escape(nama)) if nama else ""}</div>
+  <div class="kb-teks">Bagian ini menilai <b>komposisi</b> APBD, bukan kecepatan realisasinya: seberapa mandiri
+  pendapatan daerah, dan apakah porsi belanja pegawai serta belanja infrastruktur sesuai batas
+  <b>UU 1/2022 tentang HKPD</b>. Rasio kepatuhan dihitung dari APBD (anggaran), karena batas undang-undang
+  berlaku pada penyusunan anggaran; angka realisasi ditampilkan sebagai pembanding.</div>
+</div>""", unsafe_allow_html=True)
+    kartu_list = []
+    for _, x in r.iterrows():
+        warna = WARNA_STATUS.get(x["Status"], "#8C97B8")
+        pb = (f"Se-provinsi {an.pct(x['Se-provinsi %'])}. " if pd.notna(x["Se-provinsi %"]) else "")
+        isi = [_baris("Rumus", html.escape(x["Rumus"])),
+               _baris("Hasil", f"APBD <b>{an.pct(x['APBD %'])}</b> · realisasi s.d. bulan ini "
+                               f"{an.pct(x['Realisasi %'])}. {pb}Acuan: {x['Acuan']}."),
+               _baris("Penjelasan", html.escape(x["Penjelasan"]))]
+        kartu_list.append(
+            f'<div class="kartu-temuan" style="border-left-color:{warna}">'
+            f'<div class="kt-kepala">{lencana_status(x["Status"])}<span class="akun">{html.escape(x["Rasio"])}</span></div>'
+            f'<div class="kt-isi" style="margin-top:.5rem">{"".join(isi)}</div></div>')
+    st.markdown("".join(kartu_list), unsafe_allow_html=True)
+    st.caption("Batas belanja pegawai 30% (Pasal 146) berlaku penuh mulai 2027; per Mei 2026 pemerintah membahas "
+               "perpanjangan masa transisinya. Status di sini adalah indikasi untuk ditelusuri, bukan kesimpulan "
+               "pelanggaran.")
+
+
+def grafik_rasio_lintas(rl, fokus=None):
+    """Scatter: kemandirian fiskal (x) vs realisasi belanja (y), satu titik per wilayah."""
+    d = rl.dropna(subset=["Kemandirian fiskal %", "Realisasi belanja %"])
+    warna = ["#FF6B6B" if w == fokus else "#4CC9F0" for w in d["Wilayah"]]
+    fig = go.Figure(go.Scatter(
+        x=d["Kemandirian fiskal %"], y=d["Realisasi belanja %"], mode="markers+text", text=d["Wilayah"],
+        textposition="top center", textfont=dict(size=10, color="#B4BEDB"),
+        marker=dict(size=13, color=warna, line=dict(width=1, color="#0B1026")),
+        hovertemplate="<b>%{text}</b><br>Kemandirian %{x:.1f}%<br>Realisasi belanja %{y:.1f}%<extra></extra>"))
+    fig.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", font=dict(color="#D5DCEF"),
+                      height=460, margin=dict(l=10, r=20, t=20, b=10),
+                      xaxis=dict(title="Kemandirian fiskal (PAD ÷ pendapatan, %)", gridcolor="rgba(255,255,255,.08)"),
+                      yaxis=dict(title="Realisasi belanja (%)", gridcolor="rgba(255,255,255,.08)"))
+    return fig
+
+
+def tabel_rasio_lintas(rl):
+    fmt = {c: an.pct for c in rl.columns if c.endswith("%")}
+
+    def warnai(v):
+        return f"color:{WARNA_STATUS[v]};font-weight:600" if v in WARNA_STATUS else ""
+    gaya = rl.style.format(fmt)
+    gaya = (gaya.map if hasattr(gaya, "map") else gaya.applymap)(
+        warnai, subset=["Status pegawai (maks 30%)", "Status modal (min 40%)"])
+    st.dataframe(gaya, hide_index=True, width="stretch")
+
+
+def bagian_rasio_lintas(rl, fokus=None):
+    if rl is None or rl.empty:
+        st.info("Data pembanding antar wilayah tidak tersedia.")
+        return
+    n_peg = int((rl["Status pegawai (maks 30%)"] == "Melebihi batas").sum())
+    n_mod = int((rl["Status modal (min 40%)"] == "Di bawah batas").sum())
+    st.markdown(f"**Kepatuhan antar wilayah:** {n_peg} dari {len(rl)} wilayah porsi belanja pegawainya di atas 30%, "
+                f"dan {n_mod} dari {len(rl)} porsi belanja modalnya di bawah 40% (dihitung dari APBD).")
+    st.caption("Grafik: setiap titik satu wilayah. Makin ke kanan makin mandiri pendapatannya; makin ke atas makin "
+               "tinggi realisasi belanjanya. Titik merah = wilayah yang dipilih.")
+    st.plotly_chart(grafik_rasio_lintas(rl, fokus), width="stretch", key=f"rl_{fokus}")
+    tabel_rasio_lintas(rl.sort_values("Belanja pegawai %", ascending=False))
+
+
+# ---------------------------------------------------------------------------
+# Tren bulanan
+# ---------------------------------------------------------------------------
+BULAN_PENDEK = ["Jan", "Feb", "Mar", "Apr", "Mei", "Jun", "Jul", "Agu", "Sep", "Okt", "Nov", "Des"]
+
+
+def ambil_tren(tahun, periode, prov, pemda):
+    daftar = [(f"{tahun}|{b}", tahun, b, prov, pemda) for b in range(1, periode + 1)]
+    daftar += [(f"{tahun - 1}|{b}", tahun - 1, b, prov, pemda) for b in range(1, 13)]
+    data = ambil_banyak(daftar, "Mengambil data tiap bulan dari DJPK")
+    ini = {int(k.split("|")[1]): v for k, v in data.items() if k.startswith(f"{tahun}|")}
+    lalu = {int(k.split("|")[1]): v for k, v in data.items() if k.startswith(f"{tahun - 1}|")}
+    return an.susun_tren(ini), an.susun_tren(lalu)
+
+
+def grafik_tren(ini, lalu, akun, periode, tahun, proy=None):
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=BULAN_PENDEK, y=[(b / 12 * 100) for b in range(1, 13)], name="Target waktu (merata)",
+                             mode="lines", line=dict(color="#8C97B8", dash="dot", width=2)))
+    l = lalu[lalu["Akun"] == akun].sort_values("Bulan")
+    if not l.empty:
+        fig.add_trace(go.Scatter(x=[BULAN_PENDEK[b - 1] for b in l["Bulan"]], y=l["Real%"], name=f"Tahun {tahun - 1}",
+                                 mode="lines+markers", line=dict(color="#9D8CFF", dash="dash", width=2),
+                                 marker=dict(size=6)))
+    i = ini[ini["Akun"] == akun].sort_values("Bulan")
+    if not i.empty:
+        fig.add_trace(go.Scatter(x=[BULAN_PENDEK[b - 1] for b in i["Bulan"]], y=i["Real%"], name=f"Tahun {tahun}",
+                                 mode="lines+markers", line=dict(color="#4CC9F0", width=4), marker=dict(size=9)))
+    if proy:
+        fig.add_trace(go.Scatter(x=[BULAN_PENDEK[periode - 1], "Des"], y=[proy["Sekarang %"], proy["Perkiraan Desember %"]],
+                                 name="Proyeksi (pola tahun lalu)", mode="lines+markers",
+                                 line=dict(color="#4CC9F0", dash="dot", width=3),
+                                 marker=dict(size=10, symbol="diamond-open")))
+    fig.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", font=dict(color="#D5DCEF"),
+                      height=440, margin=dict(l=10, r=20, t=20, b=10), hovermode="x unified",
+                      yaxis=dict(title="Realisasi kumulatif (% dari anggaran)", range=[0, 110],
+                                 gridcolor="rgba(255,255,255,.08)"),
+                      xaxis=dict(gridcolor="rgba(255,255,255,.05)"), legend=dict(orientation="h", y=-0.15))
+    return fig
+
+
+def bagian_tren(kunci, kode, tahun, periode):
+    st.markdown("""
+<div class="kepala-bagian">
+  <div class="kb-label">Tren bulanan &amp; proyeksi akhir tahun</div>
+  <div class="kb-teks">Grafik <b>kurva S</b>: realisasi kumulatif dari Januari sampai bulan terpilih, dibandingkan
+  dengan tahun lalu dan target waktu. Dari sini terlihat <b>kapan serapan melambat</b> dan apakah realisasi
+  biasanya <b>menumpuk di bulan Desember</b>, yang merupakan risiko audit (pekerjaan dan SPJ dikebut di akhir tahun).
+  Proyeksi akhir tahun memakai pola tahun lalu: jika sisa tahun berjalan seperti tahun lalu, berapa yang akhirnya
+  terserap.</div>
+</div>""", unsafe_allow_html=True)
+    if kode is None:
+        st.info("Tren bulanan hanya tersedia pada sumber data 'Ambil otomatis dari DJPK' mode Satu pemda, "
+                "karena sistem perlu mengambil data setiap bulan.")
+        return None
+    simpan = st.session_state.setdefault("tren", {})
+    if kunci not in simpan:
+        st.caption(f"Sistem akan mengambil {periode + 12} data bulanan dari DJPK ({periode} bulan tahun {tahun} dan "
+                   f"12 bulan tahun {tahun - 1}). Data disimpan sementara 6 jam.")
+        if st.button("Ambil data tren bulanan", type="primary", key=f"tren_{kunci}"):
+            simpan[kunci] = ambil_tren(tahun, periode, *kode)
+            st.rerun()
+        return None
+    ini, lalu = simpan[kunci]
+    if ini.empty:
+        st.warning("Data bulanan tidak berhasil diambil. Coba lagi nanti.")
+        if st.button("Coba lagi", key=f"tren_ulang_{kunci}"):
+            simpan.pop(kunci, None)
+            st.rerun()
+        return None
+    pilihan = [a for a in an.AKUN_TREN if a in set(ini["Akun"])]
+    akun = st.selectbox("Akun", pilihan, index=pilihan.index("Belanja Daerah") if "Belanja Daerah" in pilihan else 0,
+                        key=f"tren_akun_{kunci}")
+    proy_semua = [p for p in (an.proyeksi_akhir_tahun(ini, lalu, a, periode) for a in pilihan) if p]
+    proy = next((p for p in proy_semua if p["Akun"] == akun), None)
+    st.plotly_chart(grafik_tren(ini, lalu, akun, periode, tahun, proy), width="stretch", key=f"gt_{kunci}_{akun}")
+    if proy:
+        kartu_html = [
+            kartu("Realisasi sekarang", an.pct(proy["Sekarang %"]),
+                  f"tahun lalu pada bulan yang sama {an.pct(proy['Tahun lalu s.d. bulan ini %'])}"),
+            kartu("Perkiraan akhir tahun", an.pct(proy["Perkiraan Desember %"]),
+                  f"tahun lalu berakhir di {an.pct(proy['Tahun lalu Desember %'])}",
+                  WARNA["Tinggi"] if proy["Perkiraan Desember %"] < 85 else None),
+            kartu("Potensi tidak terserap", an.rp(proy["Tidak terserap (Rp)"]), "jika pola sama dengan tahun lalu",
+                  kecil=True),
+        ]
+        if pd.notna(proy["Lonjakan Desember tahun lalu (poin)"]):
+            lonjak = proy["Lonjakan Desember tahun lalu (poin)"]
+            kartu_html.append(kartu("Lonjakan Desember tahun lalu", f"+{an.angka(lonjak, 1)} poin",
+                                    "naik dalam satu bulan terakhir saja",
+                                    WARNA["Sedang"] if lonjak >= 15 else None))
+        st.markdown(f'<div class="kartu-baris">{"".join(kartu_html)}</div>', unsafe_allow_html=True)
+    elif periode < 12:
+        st.caption("Proyeksi tidak dapat dihitung karena data tahun lalu belum lengkap.")
+    with st.expander("Tabel proyeksi semua akun"):
+        if proy_semua:
+            t = pd.DataFrame(proy_semua)
+            fmt = {c: an.pct for c in t.columns if c.endswith("%")}
+            fmt["Tidak terserap (Rp)"] = an.rp
+            fmt["Lonjakan Desember tahun lalu (poin)"] = lambda v: an.angka(v, 1)
+            st.dataframe(t.style.format(fmt), hide_index=True, width="stretch")
+        else:
+            st.write("Belum ada proyeksi.")
+    st.caption("Proyeksi = realisasi sekarang × (realisasi Desember tahun lalu ÷ realisasi bulan yang sama tahun lalu). "
+               "Ini perkiraan sederhana, bukan kepastian.")
+    return proy_semua
+
+
+# ---------------------------------------------------------------------------
+# Kertas kerja audit (Excel)
+# ---------------------------------------------------------------------------
+KOLOM_TEMUAN = {"Akun": "Akun", "Kelompok": "Kelompok", "Risiko": "Risiko", "Skor": "Skor",
+                "Anggaran": "Anggaran (Rp)", "Realisasi": "Realisasi (Rp)", "Real%": "Realisasi %",
+                "Waktu%": "Target waktu %", "Gap_Waktu": "Selisih vs target (poin)",
+                "Real%_Pembanding": "Se-provinsi %", "Real%_TahunLalu": "Tahun lalu %",
+                "Sisa": "Belum terealisasi (Rp)", "Alasan": "Alasan risiko"}
+
+
+def tabel_temuan(h, wilayah=False):
+    r = h[(h["Risiko"] != "Rendah") & (h["Level"] > 1)].sort_values(["Skor", "Sisa"], ascending=False).copy()
+    kol = (["Wilayah"] if wilayah else []) + [k for k in KOLOM_TEMUAN if k in r.columns]
+    t = r[kol].rename(columns=KOLOM_TEMUAN)
+    t["Saran pemeriksaan"] = [saran_untuk(x) for _, x in r.iterrows()]
+    t["Tanggapan auditee"] = ""
+    t["Kesimpulan auditor"] = ""
+    return t
+
+
+def tabel_anomali(a):
+    if a is None or a.empty:
+        return None
+    kol = ["Wilayah", "Jenis"] + [k for k in KOLOM_TEMUAN if k in a.columns]
+    t = a[kol].rename(columns=KOLOM_TEMUAN).rename(columns={"Jenis": "Jenis anomali"})
+    t["Saran pemeriksaan"] = [saran_untuk(x) for _, x in a.iterrows()]
+    return t
+
+
+def tabel_semua(h):
+    kol = [k for k in KOLOM_TEMUAN if k in h.columns]
+    return h[["Level"] + kol].rename(columns=KOLOM_TEMUAN)
+
+
+def kertas_kerja(info: dict, lembar: dict) -> bytes:
+    """Excel berformat: lembar Ringkasan + lembar-lembar data, header berwarna, kolom lebar, Rp & % rapi."""
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.utils import get_column_letter
+
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as w:
+        pd.DataFrame({"Keterangan": list(info.keys()), "Isi": [str(v) for v in info.values()]}).to_excel(
+            w, sheet_name="Ringkasan", index=False)
+        for nama, df in lembar.items():
+            if df is not None and not df.empty:
+                df.to_excel(w, sheet_name=nama[:31], index=False)
+        kepala = PatternFill("solid", fgColor="1E2A63")
+        isi_risiko = {"Tinggi": "FFD9D9", "Sedang": "FFEFD1", "Melebihi batas": "FFD9D9", "Di bawah batas": "FFD9D9",
+                      "Sesuai batas": "D7F7E9"}
+        for ws in w.book.worksheets:
+            ws.freeze_panes = "A2"
+            for c in ws[1]:
+                c.font = Font(bold=True, color="FFFFFF")
+                c.fill = kepala
+                c.alignment = Alignment(wrap_text=True, vertical="center")
+            ws.row_dimensions[1].height = 32
+            for j, col in enumerate(ws.iter_cols(min_row=1, max_row=ws.max_row), 1):
+                judul = str(col[0].value or "")
+                panjang = max(len(str(c.value or "")) for c in col[: min(len(col), 60)])
+                lebar = 60 if judul in ("Alasan risiko", "Saran pemeriksaan", "Penjelasan", "Isi", "Catatan") else \
+                    min(max(12, panjang + 2), 38)
+                ws.column_dimensions[get_column_letter(j)].width = lebar
+                for c in col[1:]:
+                    if "(Rp)" in judul and isinstance(c.value, (int, float)):
+                        c.number_format = '#,##0'
+                    elif (judul.endswith("%") or "(poin)" in judul) and isinstance(c.value, (int, float)):
+                        c.number_format = '0.0'
+                    if lebar == 60:
+                        c.alignment = Alignment(wrap_text=True, vertical="top")
+                    if isinstance(c.value, str) and c.value in isi_risiko:
+                        c.fill = PatternFill("solid", fgColor=isi_risiko[c.value])
+                        c.font = Font(bold=True)
+    return buf.getvalue()
+
+
+def peringkat_excel(p):
+    if p is None or p.empty:
+        return None
+    ganti = {a: f"{a} %" for a in an.AKUN_KUNCI}
+    ganti.update({"Anggaran Belanja": "Anggaran belanja (Rp)", "Sisa Belanja": "Belum terealisasi (Rp)",
+                  "Gap Belanja vs Waktu": "Belanja vs target (poin)"})
+    return p.rename(columns=ganti)
+
+
+def lembar_ai(kunci):
+    m = st.session_state.get("memo", {}).get(kunci)
+    if not m or m[0] != "ok":
+        return None
+    return pd.DataFrame({"Catatan": m[1].splitlines()})
+
+
+def bagian_unduh(info, lembar, nama_file):
+    st.subheader("Langkah 4 · Unduh kertas kerja audit")
+    st.caption("File Excel berisi beberapa lembar: " + ", ".join(["Ringkasan"] + [k for k, v in lembar.items()
+                                                                                    if v is not None and not v.empty])
+               + ". Lembar Temuan risiko menyediakan kolom kosong 'Tanggapan auditee' dan 'Kesimpulan auditor' "
+               "untuk diisi saat pemeriksaan.")
+    st.download_button("Unduh kertas kerja (.xlsx)", kertas_kerja(info, lembar), file_name=nama_file,
+                       type="primary", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
 # ---------------------------------------------------------------------------
 # Halaman hasil
 # ---------------------------------------------------------------------------
-def tampil_pemda(nama, tahun, periode, h, peringkat, keterangan, model, sumber, semua):
+def tampil_pemda(nama, tahun, periode, h, peringkat, keterangan, model, sumber, semua,
+                 df_now=None, df_pb=None, data=None, kode=None, ambang=15):
     waktu = periode / 12 * 100
     idx = h.set_index("Akun")
     kunci = f"pemda|{nama}|{tahun}|{periode}"
-    konteks = an.ringkasan_untuk_ai(nama, tahun, periode, h, peringkat, keterangan)
-    konteks += an.ringkasan_lintas_wilayah(semua, fokus=nama)
+    rasio = an.rasio_keuangan(df_now, df_pb) if df_now is not None else None
+    rasio_lain = an.rasio_lintas(data) if data and len(data) > 1 else None
 
     st.markdown(f"## {nama}")
     st.markdown(f'<div class="subjudul">Realisasi APBD s.d. {BULAN[periode - 1]} {tahun}. {html.escape(keterangan)}</div>',
@@ -871,12 +1166,22 @@ def tampil_pemda(nama, tahun, periode, h, peringkat, keterangan, model, sumber, 
     # --- Langkah 2: hasil perhitungan sistem
     st.subheader("Langkah 2 · Hasil perhitungan sistem")
     n_anom = len(an.cari_anomali(semua))
-    t1, t5, t2, t3, t4 = st.tabs(["Pengukuran risiko", f"Anomali ({n_anom})", "Grafik", "Tabel lengkap",
-                                  "Perbandingan antar pemda"])
+    t1, t5, t6, t7, t2, t3, t4 = st.tabs(["Pengukuran risiko", f"Anomali ({n_anom})", "Tren bulanan",
+                                          "Rasio & kepatuhan", "Grafik", "Tabel lengkap", "Perbandingan antar pemda"])
     with t1:
         daftar_temuan(h, nama)
     with t5:
         daftar_anomali(semua, fokus=nama)
+    with t6:
+        proyeksi = bagian_tren(kunci, kode, tahun, periode)
+    with t7:
+        if rasio is None:
+            st.info("Rasio tidak dapat dihitung.")
+        else:
+            bagian_rasio(rasio, nama)
+            if rasio_lain is not None:
+                st.markdown("#### Dibandingkan dengan pemda lain se-provinsi")
+                bagian_rasio_lintas(rasio_lain, nama)
     with t2:
         st.caption("Batang = realisasi tiap akun (warna = tingkat risiko). Garis abu-abu = rata-rata se-provinsi. "
                    "Garis biru putus-putus = target waktu.")
@@ -885,32 +1190,62 @@ def tampil_pemda(nama, tahun, periode, h, peringkat, keterangan, model, sumber, 
             st.plotly_chart(grafik_kelompok(h, kel, periode), width="stretch", key=f"g_{kel}")
     with t3:
         tabel_lengkap(h)
-        lembar = {"Analisis": h}
-        if peringkat is not None and not peringkat.empty:
-            lembar["Perbandingan"] = peringkat
-        st.download_button("Unduh hasil analisis (.xlsx)", unduh_excel(lembar),
-                           file_name=f"SIAGA-APBD_{nama}_{tahun}-{periode:02d}.xlsx")
+        st.caption("Unduh semua hasil dalam satu file Excel di bagian Langkah 4 (paling bawah).")
     with t4:
         if peringkat is None or peringkat.empty:
-            st.info("Centang 'Bandingkan dengan pemda se-provinsi' di sidebar untuk melihat perbandingan.")
+            st.info("Centang 'Semua pemda se-provinsi' di sidebar untuk melihat perbandingan.")
         else:
             st.caption("Diurutkan dari realisasi belanja terendah. Batang merah = pemda yang dipilih.")
             st.plotly_chart(grafik_peringkat(peringkat, nama, periode), width="stretch")
             tabel_peringkat(peringkat)
 
+    # --- Langkah 3: AI (konteks disusun setelah semua hitungan, termasuk rasio & tren)
+    konteks = an.ringkasan_untuk_ai(nama, tahun, periode, h, peringkat, keterangan)
+    if rasio is not None:
+        konteks += an.ringkasan_rasio_ai(rasio)
+    konteks += an.ringkasan_tren_ai(proyeksi or [])
+    konteks += an.ringkasan_lintas_wilayah(semua, fokus=nama)
     st.divider()
     bagian_ai(konteks, kunci, model, semua)
+
+    # --- Langkah 4: kertas kerja
+    st.divider()
+    info = {"Aplikasi": "SIAGA-APBD · AI Agent pemantauan realisasi APBD", "Wilayah": nama, "Tahun anggaran": tahun,
+            "Realisasi sampai": BULAN[periode - 1], "Target waktu (%)": round(waktu, 1),
+            "Batas tertinggal (poin)": ambang, "Akun risiko tinggi": n_t, "Akun risiko sedang": n_s,
+            "Anomali (semua wilayah yang diambil)": n_anom, "Sumber data": f"Portal Data SIKD DJPK Kemenkeu ({sumber})",
+            "Diunduh": datetime.now().strftime("%d-%m-%Y %H:%M"),
+            "Catatan": "Hasil adalah peringatan dini untuk perencanaan pemeriksaan, bukan bukti penyimpangan. "
+                       "Catatan AI wajib diverifikasi auditor."}
+    anomali = an.cari_anomali(semua)
+    lembar = {
+        "Temuan risiko": tabel_temuan(h),
+        "Semua akun": tabel_semua(h),
+        "Anomali": tabel_anomali(anomali),
+        "Rasio & kepatuhan": rasio.drop(columns=["Kunci"]) if rasio is not None else None,
+        "Rasio antar pemda": rasio_lain,
+        "Perbandingan": peringkat_excel(peringkat),
+        "Proyeksi akhir tahun": pd.DataFrame(proyeksi) if proyeksi else None,
+        "Catatan AI": lembar_ai(kunci),
+    }
+    bagian_unduh(info, lembar, f"Kertas_kerja_SIAGA-APBD_{nama}_{tahun}-{periode:02d}.xlsx".replace(" ", "_"))
     alur_agent(f"Portal Data SIKD DJPK Kemenkeu ({sumber})", model, ai_ok(kunci), wadah_alur)
 
 
-def tampil_multi(judul, tahun, periode, data, analisis, semua, model, kunci):
-    """Mode Provinsi / Nasional: peringkat antar wilayah + anomali + jumlah akun berisiko tinggi."""
+def tampil_multi(judul, tahun, periode, data, analisis, semua, model, kunci, ambang=15):
+    """Mode Provinsi / Nasional: peringkat antar wilayah + anomali + rasio + jumlah akun berisiko tinggi."""
     waktu = periode / 12 * 100
     peringkat = an.tabel_peringkat(data, periode)
     jml = {nama: int(((h["Risiko"] == "Tinggi") & (h["Level"] > 1)).sum()) for nama, h in analisis.items()}
     peringkat["Akun risiko tinggi"] = peringkat["Wilayah"].map(jml)
+    rl = an.rasio_lintas(data)
     konteks = an.ringkasan_untuk_ai(judul, tahun, periode, None, peringkat)
     konteks += "\n\n## Jumlah akun berisiko tinggi per wilayah\n" + "\n".join(f"- {k}: {v}" for k, v in jml.items())
+    if not rl.empty:
+        konteks += "\n\n## Rasio per wilayah (dari APBD): kemandirian | belanja pegawai (maks 30%) | belanja modal (min 40%)\n"
+        konteks += "\n".join(f"- {r['Wilayah']}: {an.pct(r['Kemandirian fiskal %'])} | {an.pct(r['Belanja pegawai %'])} "
+                             f"({r['Status pegawai (maks 30%)']}) | {an.pct(r['Belanja modal (proksi infrastruktur) %'])} "
+                             f"({r['Status modal (min 40%)']})" for _, r in rl.iterrows())
     konteks += an.ringkasan_lintas_wilayah(semua)
 
     st.markdown(f"## {judul}")
@@ -931,25 +1266,48 @@ def tampil_multi(judul, tahun, periode, data, analisis, semua, model, kunci):
 
     st.subheader("Langkah 2 · Hasil perhitungan sistem")
     n_anom = len(an.cari_anomali(semua))
-    t1, t3, t2 = st.tabs(["Peringkat wilayah", f"Anomali ({n_anom})", "Detail per wilayah"])
+    t1, t3, t4, t2 = st.tabs(["Peringkat wilayah", f"Anomali ({n_anom})", "Rasio & kepatuhan", "Detail per wilayah"])
     with t3:
         daftar_anomali(semua)
     with t1:
         st.caption("Diurutkan dari realisasi belanja terendah. Batang = realisasi belanja daerah; "
-                   "titik gelap = realisasi belanja modal; garis biru = target waktu.")
+                   "titik putih = realisasi belanja modal; garis biru = target waktu.")
         st.plotly_chart(grafik_peringkat(peringkat, None, periode), width="stretch")
         tabel_peringkat(peringkat)
-        st.download_button("Unduh peringkat (.xlsx)", unduh_excel({"Peringkat": peringkat}),
-                           file_name=f"SIAGA-APBD_peringkat_{tahun}-{periode:02d}.xlsx")
+    with t4:
+        st.markdown("""
+<div class="kepala-bagian">
+  <div class="kb-label">Rasio keuangan &amp; kepatuhan antar wilayah</div>
+  <div class="kb-teks">Membandingkan <b>komposisi</b> APBD semua wilayah: kemandirian fiskal (PAD ÷ pendapatan),
+  porsi belanja pegawai terhadap batas <b>maksimal 30%</b> (UU HKPD Pasal 146), dan porsi belanja modal sebagai
+  pendekatan belanja infrastruktur terhadap batas <b>minimal 40%</b> (Pasal 147). Dihitung dari APBD (anggaran).</div>
+</div>""", unsafe_allow_html=True)
+        bagian_rasio_lintas(rl)
     with t2:
         pilih = st.selectbox("Pilih wilayah", list(peringkat["Wilayah"]))
         h = analisis[pilih]
         daftar_temuan(h, pilih)
+        if pilih in data:
+            with st.expander("Rasio keuangan wilayah ini"):
+                bagian_rasio(an.rasio_keuangan(data[pilih]), pilih)
         with st.expander("Tabel lengkap"):
             tabel_lengkap(h)
 
     st.divider()
     bagian_ai(konteks, kunci, model, semua)
+
+    st.divider()
+    berisiko = semua[(semua["Risiko"] != "Rendah") & (semua["Level"] > 1)]
+    info = {"Aplikasi": "SIAGA-APBD · AI Agent pemantauan realisasi APBD", "Cakupan": judul, "Tahun anggaran": tahun,
+            "Realisasi sampai": BULAN[periode - 1], "Target waktu (%)": round(waktu, 1),
+            "Batas tertinggal (poin)": ambang, "Wilayah dibandingkan": len(data), "Anomali": n_anom,
+            "Sumber data": "Portal Data SIKD DJPK Kemenkeu", "Diunduh": datetime.now().strftime("%d-%m-%Y %H:%M"),
+            "Catatan": "Hasil adalah peringatan dini untuk perencanaan pemeriksaan, bukan bukti penyimpangan. "
+                       "Catatan AI wajib diverifikasi auditor."}
+    lembar = {"Peringkat": peringkat_excel(peringkat), "Rasio & kepatuhan": rl, "Anomali": tabel_anomali(an.cari_anomali(semua)),
+              "Akun berisiko": tabel_temuan(berisiko, wilayah=True) if not berisiko.empty else None,
+              "Catatan AI": lembar_ai(kunci)}
+    bagian_unduh(info, lembar, f"Kertas_kerja_SIAGA-APBD_{judul}_{tahun}-{periode:02d}.xlsx".replace(" ", "_"))
     alur_agent("Portal Data SIKD DJPK Kemenkeu", model, ai_ok(kunci), wadah_alur)
 
 
@@ -1018,7 +1376,8 @@ if jalan:
             h = an.analisis_pemda(df_now, periode, df_tl, df_pb, ambang)
             st.session_state["hasil"] = dict(jenis="pemda", nama=nama_up, h=h, peringkat=None,
                                              keterangan="Data dari file upload.", sumber="file upload",
-                                             semua=an.gabung_hasil({nama_up: h}))
+                                             semua=an.gabung_hasil({nama_up: h}), df_now=df_now, df_pb=df_pb,
+                                             data=None, kode=None)
         elif mode == "Satu pemda":
             with st.spinner(f"Mengambil data {pemda_map[pemda]} dari DJPK..."):
                 df_now, info = ambil_aman(tahun, periode, prov, pemda)
@@ -1040,11 +1399,13 @@ if jalan:
             analisis.update({w: an.analisis_pemda(df, periode, df_pembanding=agregat, ambang_waktu=ambang)
                              for w, df in lain.items()})
             peringkat = None
+            lain[pemda_map[pemda]] = df_now
             if cek_peer:
-                lain[pemda_map[pemda]] = df_now
                 peringkat = an.tabel_peringkat(lain, periode)
             st.session_state["hasil"] = dict(jenis="pemda", nama=pemda_map[pemda], h=h, peringkat=peringkat,
-                                             keterangan=ket, sumber=info, semua=an.gabung_hasil(analisis))
+                                             keterangan=ket, sumber=info, semua=an.gabung_hasil(analisis),
+                                             df_now=df_now, df_pb=agregat, data=lain if cek_peer else None,
+                                             kode=(prov, pemda))
         elif mode == "Satu provinsi":
             pemda_map = ambil_pemda(prov, tahun)
             daftar = [(v, tahun, periode, prov, k) for k, v in pemda_map.items()]
@@ -1068,6 +1429,8 @@ if jalan:
             st.session_state["hasil"] = dict(jenis="multi", judul="Nasional (gabungan per provinsi)",
                                              data=data, analisis=analisis, semua=an.gabung_hasil(analisis))
         st.session_state["param"] = (tahun, periode)
+        if "hasil" in st.session_state:
+            st.session_state["hasil"]["ambang"] = ambang
     except Exception as e:
         st.error(f"Terjadi kesalahan: {e}")
 
@@ -1086,6 +1449,8 @@ atau tidak wajar**, lalu meminta AI menuliskan catatan audit dan langkah pemerik
 else:
     t_, p_ = st.session_state["param"]
     if H["jenis"] == "pemda":
-        tampil_pemda(H["nama"], t_, p_, H["h"], H["peringkat"], H["keterangan"], model, H["sumber"], H["semua"])
+        tampil_pemda(H["nama"], t_, p_, H["h"], H["peringkat"], H["keterangan"], model, H["sumber"], H["semua"],
+                     H.get("df_now"), H.get("df_pb"), H.get("data"), H.get("kode"), H.get("ambang", 15))
     else:
-        tampil_multi(H["judul"], t_, p_, H["data"], H["analisis"], H["semua"], model, f"multi|{H['judul']}|{t_}|{p_}")
+        tampil_multi(H["judul"], t_, p_, H["data"], H["analisis"], H["semua"], model, f"multi|{H['judul']}|{t_}|{p_}",
+                     H.get("ambang", 15))
