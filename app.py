@@ -43,7 +43,7 @@ st.set_page_config(page_title="SIAGA-APBD", layout="wide")
 BULAN = ["Januari", "Februari", "Maret", "April", "Mei", "Juni", "Juli",
          "Agustus", "September", "Oktober", "November", "Desember"]
 
-WARNA = {"Tinggi": "#e5484d", "Sedang": "#f08c00", "Rendah": "#2f9e74"}
+WARNA = {"Tinggi": "#FF6B6B", "Sedang": "#FFB547", "Rendah": "#3DDC97"}
 ARTI_RISIKO = {
     "Tinggi": "prioritaskan untuk diperiksa atau dimintai penjelasan",
     "Sedang": "perlu dipantau sampai akhir tahun",
@@ -145,44 +145,103 @@ CONTOH_PERTANYAAN = [
 # ---------------------------------------------------------------------------
 st.markdown("""
 <style>
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Space+Grotesk:wght@500;600;700&display=swap');
+:root {--cyan:#4CC9F0; --violet:#9D8CFF; --ungu:#7B61FF; --biru:#3D5AFE; --hijau:#3DDC97; --amber:#FFB547;
+       --coral:#FF6B6B; --teks:#EEF1FA; --redup:#B4BEDB; --garis:rgba(255,255,255,.12);}
+html, body, [class*="css"], .stApp, .stMarkdown, button, input, textarea, select {font-family: 'Plus Jakarta Sans', sans-serif;}
+.stApp {background: radial-gradient(1200px 600px at 85% -10%, rgba(61,90,254,.28), transparent 60%),
+                     radial-gradient(900px 500px at -10% 110%, rgba(157,140,255,.18), transparent 60%), #0B1026;}
+[data-testid="stHeader"] {background: transparent;}
+[data-testid="stSidebar"] {background: linear-gradient(180deg, #121A45 0%, #0D1333 100%);
+                           border-right: 1px solid var(--garis);}
 .block-container {padding-top: 2.2rem; max-width: 1200px;}
-h1 {font-size: 2rem !important; margin-bottom: 0 !important;}
-.subjudul {opacity: .75; margin-top: .2rem; margin-bottom: 1.2rem;}
-.alur {display: flex; gap: .6rem; margin: .4rem 0 1.4rem 0; flex-wrap: wrap;}
-.langkah {flex: 1; min-width: 200px; border: 1px solid rgba(128,128,128,.3); border-radius: 10px;
-          padding: .7rem .9rem;}
-.langkah .no {font-size: .75rem; letter-spacing: .04em; text-transform: uppercase; opacity: .65;}
-.langkah .judul {font-weight: 600; margin: .1rem 0;}
-.langkah .ket {font-size: .85rem; opacity: .75;}
-.langkah.ai {border-color: #4c6ef5; background: rgba(76,110,245,.08);}
-.status {font-size: .8rem; font-weight: 600;}
-.kartu-baris {display: grid; grid-template-columns: repeat(auto-fit, minmax(165px, 1fr)); gap: .7rem;
-              margin: .3rem 0 1rem 0;}
-.kartu {border: 1px solid rgba(128,128,128,.3); border-radius: 10px; padding: .8rem 1rem;}
-.kartu .label {font-size: .85rem; opacity: .75;}
-.kartu .nilai {font-size: 1.7rem; font-weight: 650; line-height: 1.25; margin: .15rem 0;}
-.kartu .nilai.kecil {font-size: 1.15rem;}
-.kartu .catatan {font-size: .85rem;}
-.lencana {display: inline-block; font-weight: 700; font-size: .8rem; padding: .1rem .5rem;
-          border-radius: 999px; border: 1.5px solid currentColor; margin-right: .4rem; white-space: nowrap;}
-.temuan {border-bottom: 1px solid rgba(128,128,128,.2); padding: .55rem 0;}
+h1, h2, h3 {font-family: 'Space Grotesk', sans-serif !important; letter-spacing: -.01em;}
+h1 {font-size: 2.3rem !important; margin-bottom: 0 !important;}
+h1 span[data-heading-text] {background: linear-gradient(90deg, #FFFFFF 0%, #8FDDF7 45%, #9D8CFF 100%);
+    -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;}
+.subjudul {color: var(--redup); margin-top: .3rem; margin-bottom: 1.4rem;}
+
+/* Tombol utama: gradien */
+.stButton > button[kind="primary"], .stFormSubmitButton > button[kind="primary"] {
+  background: linear-gradient(120deg, var(--biru) 0%, var(--ungu) 60%, #B06CFF 100%); border: 0;
+  box-shadow: 0 8px 24px rgba(123,97,255,.35); font-weight: 700; transition: transform .15s, box-shadow .15s;}
+.stButton > button[kind="primary"]:hover {transform: translateY(-1px); box-shadow: 0 12px 30px rgba(123,97,255,.5);}
+.stButton > button[kind="secondary"] {border: 1px solid rgba(76,201,240,.45); background: rgba(76,201,240,.06);}
+.stButton > button[kind="secondary"]:hover {border-color: var(--cyan); color: var(--cyan);}
+
+/* Tab */
+.stTabs [data-baseweb="tab-list"] {gap: .4rem; border-bottom: 1px solid var(--garis);}
+.stTabs [data-baseweb="tab"] {border-radius: 10px 10px 0 0; padding: .5rem 1rem;}
+.stTabs [aria-selected="true"] {background: rgba(76,201,240,.10); color: var(--cyan) !important;}
+.stTabs [data-baseweb="tab-highlight"] {background: linear-gradient(90deg, var(--cyan), var(--violet));}
+
+/* Expander dan tabel data */
+[data-testid="stExpander"] details {border: 1px solid var(--garis); border-radius: 14px;
+                                    background: rgba(255,255,255,.03);}
+[data-testid="stDataFrame"] {border: 1px solid var(--garis); border-radius: 12px; overflow: hidden;}
+
+/* Alur 3 langkah */
+.alur {display: flex; gap: .8rem; margin: .4rem 0 1.4rem 0; flex-wrap: wrap;}
+.langkah {flex: 1; min-width: 200px; border: 1px solid var(--garis); border-top: 3px solid var(--cyan);
+          border-radius: 14px; padding: .85rem 1rem;
+          background: linear-gradient(160deg, rgba(255,255,255,.07) 0%, rgba(255,255,255,.02) 100%);
+          box-shadow: 0 14px 30px rgba(3,6,20,.45);}
+.langkah:nth-child(2) {border-top-color: var(--hijau);}
+.langkah .no {font-size: .72rem; letter-spacing: .1em; text-transform: uppercase; color: var(--cyan); font-weight: 700;}
+.langkah:nth-child(2) .no {color: var(--hijau);}
+.langkah .judul {font-weight: 700; margin: .2rem 0; font-size: 1.02rem;}
+.langkah .ket {font-size: .85rem; color: var(--redup);}
+.langkah.ai {border: 1px solid rgba(255,255,255,.25); border-top: 3px solid #FFFFFF;
+             background: linear-gradient(140deg, rgba(61,90,254,.55) 0%, rgba(123,97,255,.55) 100%);
+             box-shadow: 0 16px 36px rgba(123,97,255,.30);}
+.langkah.ai .no {color: #E9E8FF;}
+.langkah.ai .ket {color: #E3E0FF;}
+.status {font-size: .78rem; font-weight: 700; margin-top: .35rem; display: inline-block;
+         padding: .08rem .55rem; border-radius: 999px; background: rgba(255,255,255,.08);}
+
+/* Kartu angka */
+.kartu-baris {display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: .8rem;
+              margin: .3rem 0 1.1rem 0;}
+.kartu {border: 1px solid var(--garis); border-radius: 14px; padding: .9rem 1.1rem; position: relative; overflow: hidden;
+        background: linear-gradient(160deg, rgba(255,255,255,.07) 0%, rgba(255,255,255,.02) 100%);
+        box-shadow: 0 14px 30px rgba(3,6,20,.45);}
+.kartu::before {content: ""; position: absolute; left: 0; top: 0; right: 0; height: 3px;
+                background: linear-gradient(90deg, var(--cyan), var(--violet));}
+.kartu .label {font-size: .82rem; color: var(--redup); letter-spacing: .02em;}
+.kartu .nilai {font-family: 'Space Grotesk', sans-serif; font-size: 1.9rem; font-weight: 700; line-height: 1.2;
+               margin: .2rem 0; color: #FFFFFF;}
+.kartu .nilai.kecil {font-size: 1.2rem;}
+.kartu .catatan {font-size: .85rem; color: var(--redup);}
+
+/* Label risiko, temuan */
+.lencana {display: inline-block; font-weight: 700; font-size: .78rem; padding: .12rem .6rem;
+          border-radius: 999px; border: 1.5px solid currentColor; margin-right: .4rem; white-space: nowrap;
+          background: rgba(255,255,255,.04);}
+.temuan {border-bottom: 1px solid var(--garis); padding: .6rem 0;}
 .temuan .akun {font-weight: 600;}
-.temuan .rinci {font-size: .9rem; opacity: .85; margin-top: .15rem;}
-.kepala-bagian {border-left: 4px solid #4c6ef5; padding: .3rem 0 .3rem .9rem; margin: .4rem 0 1rem 0;}
-.kb-label {font-size: .85rem; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: #4c6ef5;}
-.kb-teks {font-size: .95rem; margin-top: .25rem; line-height: 1.65;}
-.kartu-temuan {border: 1px solid rgba(128,128,128,.28); border-left: 4px solid; border-radius: 8px;
-               padding: .8rem 1rem; margin-bottom: .8rem;}
-.kt-kepala .akun {font-weight: 650; font-size: 1.05rem;}
+.temuan .rinci {font-size: .9rem; color: var(--redup); margin-top: .15rem;}
+.kepala-bagian {border-left: 4px solid var(--cyan); padding: .5rem 0 .5rem 1rem; margin: .4rem 0 1rem 0;
+                background: linear-gradient(90deg, rgba(76,201,240,.10), transparent 70%); border-radius: 0 12px 12px 0;}
+.kb-label {font-family: 'Space Grotesk', sans-serif; font-size: .9rem; font-weight: 700; letter-spacing: .12em;
+           text-transform: uppercase; color: var(--cyan);}
+.kb-teks {font-size: .95rem; margin-top: .25rem; line-height: 1.65; color: #D5DCEF;}
+.kartu-temuan {border: 1px solid var(--garis); border-left: 4px solid; border-radius: 12px;
+               padding: .9rem 1.1rem; margin-bottom: .9rem;
+               background: linear-gradient(160deg, rgba(255,255,255,.06) 0%, rgba(255,255,255,.015) 100%);
+               box-shadow: 0 10px 24px rgba(3,6,20,.35);}
+.kt-kepala .akun {font-weight: 700; font-size: 1.05rem;}
 .kt-inti {margin: .35rem 0 .55rem 0; font-weight: 500;}
 .kt-isi {display: grid; grid-template-columns: 150px 1fr; gap: .3rem .9rem; font-size: .92rem;}
-.kt-isi .b-label {opacity: .65;}
+.kt-isi .b-label {color: #8C97B8;}
 .kt-isi ul {margin: 0; padding-left: 1.1rem;}
 @media (max-width: 640px) {.kt-isi {grid-template-columns: 1fr;} .kt-isi .b-label {margin-top: .3rem;}}
-.kotak-ai {border: 1px solid #4c6ef5; border-radius: 10px; padding: .2rem 1.2rem 1rem 1.2rem;
-           background: rgba(76,110,245,.05);}
-.kotak-ai .kepala {font-size: .8rem; opacity: .75; margin: .7rem 0 .2rem 0;}
-.panduan td {padding: .25rem .6rem .25rem 0; vertical-align: top;}
+
+/* Kotak AI */
+.kotak-ai {border: 1px solid rgba(157,140,255,.55); border-radius: 14px; padding: .3rem 1.3rem 1.1rem 1.3rem;
+           background: linear-gradient(160deg, rgba(123,97,255,.14) 0%, rgba(61,90,254,.05) 100%);
+           box-shadow: 0 14px 34px rgba(123,97,255,.18);}
+.kotak-ai .kepala {font-size: .8rem; color: #C9C1FF; margin: .7rem 0 .2rem 0; letter-spacing: .04em;}
+.panduan td {padding: .35rem .7rem .35rem 0; vertical-align: top; border-color: var(--garis) !important;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -470,7 +529,7 @@ def alur_agent(sumber, model, ai_selesai, wadah=None):
     <div class="status" style="color:{WARNA['Rendah']}">selesai</div></div>
   <div class="langkah ai"><div class="no">Langkah 3 · AI</div><div class="judul">Tulis catatan audit &amp; jawab pertanyaan</div>
     <div class="ket">Groq · {html.escape(model)} · dapat mencari data sendiri</div>
-    <div class="status" style="color:#4c6ef5">{ket_ai}</div></div>
+    <div class="status" style="color:#FFFFFF">{ket_ai}</div></div>
 </div>""", unsafe_allow_html=True)
 
 
@@ -722,11 +781,12 @@ def grafik_kelompok(h, kelompok, periode):
         showlegend=False))
     if d["Real%_Pembanding"].notna().any():
         fig.add_trace(go.Scatter(x=d["Real%_Pembanding"], y=d["Akun"], mode="markers", name="Rata-rata se-provinsi",
-                                 marker=dict(symbol="line-ns", size=16, line=dict(width=3, color="#868e96"))))
-    fig.add_vline(x=waktu, line_dash="dash", line_color="#4c6ef5")
+                                 marker=dict(symbol="line-ns", size=16, line=dict(width=3, color="#B4BEDB"))))
+    fig.add_vline(x=waktu, line_dash="dash", line_color="#4CC9F0")
     fig.add_annotation(x=waktu, y=1.02, yref="paper", text=f"Target waktu {an.pct(waktu)}", showarrow=False,
-                       font=dict(color="#4c6ef5"), xanchor="left")
-    fig.update_layout(height=60 + 34 * len(d), margin=dict(l=10, r=40, t=30, b=10),
+                       font=dict(color="#4CC9F0"), xanchor="left")
+    fig.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", font=dict(color="#D5DCEF"),
+                      height=60 + 34 * len(d), margin=dict(l=10, r=40, t=30, b=10),
                       xaxis=dict(title="Realisasi (% dari anggaran)", range=[0, max(110, d["Real%"].max() + 15)]),
                       yaxis=dict(autorange="reversed", title=""), legend=dict(orientation="h", y=-0.15),
                       bargap=0.35)
@@ -735,17 +795,18 @@ def grafik_kelompok(h, kelompok, periode):
 
 def grafik_peringkat(p, fokus, periode):
     waktu = periode / 12 * 100
-    warna = ["#e5484d" if w == fokus else "#74a9cf" for w in p["Wilayah"]]
+    warna = ["#FF6B6B" if w == fokus else "#5B7CFA" for w in p["Wilayah"]]
     fig = go.Figure(go.Bar(x=p["Belanja Daerah"], y=p["Wilayah"], orientation="h", marker_color=warna,
                            text=[an.pct(v) for v in p["Belanja Daerah"]], textposition="outside",
                            cliponaxis=False, name="Realisasi belanja daerah"))
     fig.add_trace(go.Scatter(x=p["Belanja Modal"], y=p["Wilayah"], mode="markers", name="Realisasi belanja modal",
-                             marker=dict(symbol="circle", size=9, color="#343a40",
-                                         line=dict(width=1, color="white"))))
-    fig.add_vline(x=waktu, line_dash="dash", line_color="#4c6ef5")
+                             marker=dict(symbol="circle", size=9, color="#EEF1FA",
+                                         line=dict(width=1, color="#0B1026"))))
+    fig.add_vline(x=waktu, line_dash="dash", line_color="#4CC9F0")
     fig.add_annotation(x=waktu, y=1.02, yref="paper", text=f"Target waktu {an.pct(waktu)}", showarrow=False,
-                       font=dict(color="#4c6ef5"), xanchor="left")
-    fig.update_layout(height=80 + 32 * len(p), margin=dict(l=10, r=40, t=30, b=10),
+                       font=dict(color="#4CC9F0"), xanchor="left")
+    fig.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", font=dict(color="#D5DCEF"),
+                      height=80 + 32 * len(p), margin=dict(l=10, r=40, t=30, b=10),
                       xaxis=dict(title="Realisasi (% dari anggaran)", range=[0, 110]),
                       yaxis=dict(autorange="reversed", title=""), legend=dict(orientation="h", y=-0.12))
     return fig
