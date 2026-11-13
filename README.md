@@ -20,9 +20,16 @@ Semua angka dihitung oleh Python, bukan oleh AI, untuk menghindari kesalahan hit
 ## Fitur
 - 3 mode pemantauan: **Satu Pemda**, **Satu Provinsi**, **Nasional (antar provinsi)**
 - Skor risiko per akun (Tinggi / Sedang / Rendah) beserta alasannya
+- Deteksi anomali dua arah (tertinggal dan berlebihan, misalnya realisasi tanpa anggaran)
+- **Tren bulanan (kurva S)** tahun ini vs tahun lalu, plus proyeksi realisasi akhir tahun dan
+  potensi anggaran tidak terserap
+- **Rasio keuangan & kepatuhan**: kemandirian fiskal, ketergantungan transfer, porsi belanja pegawai
+  (batas maks. 30%, UU 1/2022 Pasal 146) dan porsi belanja modal sebagai proksi belanja infrastruktur
+  (min. 40%, Pasal 147), termasuk perbandingan antar pemda
 - Grafik realisasi vs waktu berjalan dan peringkat antar pemda
-- Catatan audit otomatis dan chat tanya-jawab dengan AI
-- Unduh hasil analisis (Excel) dan catatan audit (Markdown)
+- Catatan audit otomatis dan chat tanya-jawab dengan AI (AI dapat mencari data sendiri)
+- **Kertas kerja audit (Excel)**: ringkasan, temuan risiko + saran pemeriksaan + kolom tanggapan
+  auditee/kesimpulan auditor, anomali, rasio, proyeksi, dan catatan AI
 
 ## Teknologi
 Python · Streamlit · Pandas · Plotly · Groq API (`openai/gpt-oss-120b`) · Requests/BeautifulSoup
