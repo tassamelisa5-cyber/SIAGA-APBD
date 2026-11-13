@@ -283,3 +283,164 @@ def ringkasan_untuk_ai(nama: str, tahun: int, periode: int, hasil: pd.DataFrame 
                      f"Belanja {pct(r['Belanja Daerah'])}, Barang&Jasa {pct(r['Belanja Barang dan Jasa'])}, "
                      f"Modal {pct(r['Belanja Modal'])}, sisa belanja {rp(r['Sisa Belanja'])}")
     return "\n".join(L)
+
+
+# ---------------------------------------------------------------------------
+# 4. Rasio keuangan & kepatuhan belanja wajib (UU 1/2022 tentang HKPD)
+# ---------------------------------------------------------------------------
+BATAS_PEGAWAI = 30.0      # Pasal 146: belanja pegawai paling tinggi 30% dari total belanja APBD
+BATAS_INFRA = 40.0        # Pasal 147: belanja infrastruktur pelayanan publik paling rendah 40%
+
+
+def _tabel_akun(df: pd.DataFrame) -> pd.DataFrame:
+    d = bersihkan(df)
+    return d.drop_duplicates("Akun", keep="first").set_index("Akun")
+
+
+def _bagi(a, b):
+    return a / b * 100 if b and not _kosong(a) and not _kosong(b) else np.nan
+
+
+def _komponen(t: pd.DataFrame, kolom: str) -> dict:
+    g = lambda akun: float(t.loc[akun, kolom]) if akun in t.index else 0.0
+    belanja = g("Belanja Daerah")
+    transfer = g("Belanja Bagi Hasil") + g("Belanja Bantuan Keuangan")
+    return {
+        "kemandirian": _bagi(g("PAD"), g("Pendapatan Daerah")),
+        "ketergantungan": _bagi(g("TKDD"), g("Pendapatan Daerah")),
+        "pegawai": _bagi(g("Belanja Pegawai"), belanja),
+        "modal": _bagi(g("Belanja Modal"), belanja - transfer),
+        "surplus": _bagi(g("Pendapatan Daerah") - belanja, g("Pendapatan Daerah")),
+    }
+
+
+RASIO_INFO = {
+    "kemandirian": ("Kemandirian fiskal", "PAD ÷ Pendapatan Daerah",
+                    "Seberapa besar pendapatan daerah berasal dari usaha sendiri (pajak, retribusi, laba BUMD). "
+                    "Makin tinggi makin mandiri."),
+    "ketergantungan": ("Ketergantungan transfer pusat", "TKDD ÷ Pendapatan Daerah",
+                       "Seberapa besar pendapatan bergantung pada dana dari pemerintah pusat. Makin tinggi, "
+                       "makin rentan bila penyaluran dari pusat terlambat atau dipotong."),
+    "pegawai": ("Porsi belanja pegawai", "Belanja Pegawai ÷ Belanja Daerah",
+                "UU HKPD Pasal 146 membatasi belanja pegawai paling tinggi 30% dari total belanja APBD "
+                "(di luar tunjangan guru yang dibiayai TKD), wajib dipenuhi paling lambat 5 tahun sejak UU "
+                "diundangkan (2027). Data DJPK belum memisahkan tunjangan guru, sehingga angka ini adalah indikasi."),
+    "modal": ("Porsi belanja modal (proksi infrastruktur)",
+              "Belanja Modal ÷ (Belanja Daerah − Bagi Hasil − Bantuan Keuangan)",
+              "UU HKPD Pasal 147 mewajibkan belanja infrastruktur pelayanan publik paling rendah 40% "
+              "(di luar bagi hasil dan transfer ke daerah/desa). Belanja modal dipakai sebagai pendekatan kasar, "
+              "karena tidak semua belanja modal adalah infrastruktur dan sebagian infrastruktur dicatat di akun lain."),
+    "surplus": ("Surplus (+) / defisit (−)", "(Pendapatan − Belanja) ÷ Pendapatan",
+                "Selisih pendapatan dan belanja. Defisit APBD ditutup dari pembiayaan (misalnya SiLPA tahun lalu). "
+                "Surplus realisasi yang besar di akhir tahun menandakan banyak anggaran tidak terserap."),
+}
+
+
+def _status(kunci, nilai):
+    if _kosong(nilai):
+        return "Tidak ada data"
+    if kunci == "pegawai":
+        return "Melebihi batas" if nilai > BATAS_PEGAWAI else "Sesuai batas"
+    if kunci == "modal":
+        return "Di bawah batas" if nilai < BATAS_INFRA else "Sesuai batas"
+    return "Informasi"
+
+
+def rasio_keuangan(df: pd.DataFrame, df_pembanding: pd.DataFrame | None = None) -> pd.DataFrame:
+    """Rasio dihitung dari APBD (anggaran) dan dari realisasi s.d. bulan berjalan."""
+    t = _tabel_akun(df)
+    ang, real = _komponen(t, "Anggaran"), _komponen(t, "Realisasi")
+    pb = _komponen(_tabel_akun(df_pembanding), "Anggaran") if df_pembanding is not None else {}
+    baris = []
+    for k, (nama, rumus, arti) in RASIO_INFO.items():
+        acuan = (f"Maks. {BATAS_PEGAWAI:.0f}%" if k == "pegawai" else
+                 f"Min. {BATAS_INFRA:.0f}%" if k == "modal" else "-")
+        baris.append({"Kunci": k, "Rasio": nama, "Rumus": rumus, "APBD %": ang[k], "Realisasi %": real[k],
+                      "Se-provinsi %": pb.get(k, np.nan), "Acuan": acuan, "Status": _status(k, ang[k]),
+                      "Penjelasan": arti})
+    return pd.DataFrame(baris)
+
+
+def rasio_lintas(data: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """Rasio (berbasis APBD) untuk banyak wilayah sekaligus."""
+    baris = []
+    for nama, df in data.items():
+        try:
+            k = _komponen(_tabel_akun(df), "Anggaran")
+            r = _komponen(_tabel_akun(df), "Realisasi")
+        except Exception:
+            continue
+        baris.append({"Wilayah": nama, "Kemandirian fiskal %": k["kemandirian"],
+                      "Ketergantungan transfer %": k["ketergantungan"], "Belanja pegawai %": k["pegawai"],
+                      "Belanja modal (proksi infrastruktur) %": k["modal"],
+                      "Realisasi belanja %": _bagi(*_realisasi_belanja(df)),
+                      "Status pegawai (maks 30%)": _status("pegawai", k["pegawai"]),
+                      "Status modal (min 40%)": _status("modal", k["modal"])})
+    return pd.DataFrame(baris)
+
+
+def _realisasi_belanja(df):
+    t = _tabel_akun(df)
+    if "Belanja Daerah" not in t.index:
+        return np.nan, np.nan
+    return t.loc["Belanja Daerah", "Realisasi"], t.loc["Belanja Daerah", "Anggaran"]
+
+
+def ringkasan_rasio_ai(r: pd.DataFrame) -> str:
+    L = ["\n## Rasio keuangan & kepatuhan belanja wajib (dihitung dari APBD; realisasi dalam kurung)"]
+    for _, x in r.iterrows():
+        L.append(f"- {x['Rasio']}: {pct(x['APBD %'])} (realisasi {pct(x['Realisasi %'])}; "
+                 f"se-provinsi {pct(x['Se-provinsi %'])}) | acuan {x['Acuan']} | {x['Status']}")
+    L.append("- Catatan: batas pegawai 30% (UU HKPD Ps.146) berlaku penuh 2027 dan sedang dibahas perpanjangan "
+             "transisinya; porsi belanja modal hanya proksi kasar belanja infrastruktur (Ps.147, min 40%).")
+    return "\n".join(L)
+
+
+# ---------------------------------------------------------------------------
+# 5. Tren bulanan & proyeksi akhir tahun
+# ---------------------------------------------------------------------------
+AKUN_TREN = ["Pendapatan Daerah", "PAD", "TKDD", "Belanja Daerah", "Belanja Pegawai",
+             "Belanja Barang dan Jasa", "Belanja Modal", "Belanja Lainnya"]
+
+
+def susun_tren(bulanan: dict[int, pd.DataFrame]) -> pd.DataFrame:
+    """bulanan = {bulan: df_ekspor}. Hasil: tabel panjang Bulan, Akun, Anggaran, Realisasi, Real%."""
+    baris = []
+    for b, df in sorted(bulanan.items()):
+        t = _tabel_akun(df)
+        for a in AKUN_TREN:
+            if a in t.index:
+                baris.append({"Bulan": b, "Akun": a, "Anggaran": t.loc[a, "Anggaran"],
+                              "Realisasi": t.loc[a, "Realisasi"], "Real%": t.loc[a, "Real%"]})
+    return pd.DataFrame(baris, columns=["Bulan", "Akun", "Anggaran", "Realisasi", "Real%"])
+
+
+def proyeksi_akhir_tahun(tren_ini: pd.DataFrame, tren_lalu: pd.DataFrame, akun: str, periode: int) -> dict | None:
+    """Perkiraan realisasi Desember bila pola sisa tahun sama dengan tahun lalu.
+    faktor = realisasi Des tahun lalu ÷ realisasi bulan yang sama tahun lalu."""
+    a = tren_ini[(tren_ini["Akun"] == akun) & (tren_ini["Bulan"] == periode)]
+    lalu = tren_lalu[tren_lalu["Akun"] == akun].set_index("Bulan")["Real%"] if not tren_lalu.empty else pd.Series()
+    if a.empty or periode >= 12 or periode not in lalu.index or 12 not in lalu.index or not lalu[periode]:
+        return None
+    sekarang = float(a["Real%"].iloc[0])
+    faktor = float(lalu[12]) / float(lalu[periode])
+    perkiraan = sekarang * faktor
+    if akun.startswith("Belanja"):
+        perkiraan = min(perkiraan, 100.0)
+    anggaran = float(a["Anggaran"].iloc[0])
+    desember_lalu = float(lalu[12]) - float(lalu[11]) if 11 in lalu.index else np.nan
+    return {"Akun": akun, "Sekarang %": sekarang, "Perkiraan Desember %": perkiraan,
+            "Tidak terserap (Rp)": anggaran * (1 - perkiraan / 100) if perkiraan < 100 else 0.0,
+            "Tahun lalu s.d. bulan ini %": float(lalu[periode]), "Tahun lalu Desember %": float(lalu[12]),
+            "Lonjakan Desember tahun lalu (poin)": desember_lalu}
+
+
+def ringkasan_tren_ai(proyeksi: list[dict]) -> str:
+    if not proyeksi:
+        return ""
+    L = ["\n## Proyeksi akhir tahun (jika pola sisa tahun sama dengan tahun lalu)"]
+    for p in proyeksi:
+        L.append(f"- {p['Akun']}: sekarang {pct(p['Sekarang %'])}, perkiraan Desember {pct(p['Perkiraan Desember %'])}, "
+                 f"potensi tidak terserap {rp(p['Tidak terserap (Rp)'])}; tahun lalu naik "
+                 f"{pct(p['Lonjakan Desember tahun lalu (poin)'])} poin di bulan Desember saja")
+    return "\n".join(L)
